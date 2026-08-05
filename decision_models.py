@@ -119,6 +119,34 @@ def _weighted_social(organism, others, weight_fn):
 
 
 # ----------------------------------------------------------------------
+# Cell-wall-aware feeding / spacing steering (unlocked at the cell-aware tier)
+# ----------------------------------------------------------------------
+# The whole "cooperation" effect is just two simple, unscripted forces:
+#   * plant cells  (has_cell_wall == True)  -> attract  (they are food)
+#   * animal cells (has_cell_wall == False) -> repel    (personal space)
+# Two animals drawn to the same plant push each other apart and settle on
+# different sides -- no flanking, roles, teams or pack logic is coded anywhere.
+#
+# These are plain module constants (not genes) so they stay trivially tunable.
+# Promote them to Genome fields later if you want the weights to evolve.
+PLANT_ATTRACTION = 1.0         # strength of pull toward a walled (plant) cell
+ANIMAL_REPULSION = 0.0         # magnitude of push away from another animal
+PLANT_SOFT_RADIUS = 0.0       # px: inside this the plant pull eases off, so a
+                               #     plant you're sitting on can't slingshot you
+ANIMAL_PERSONAL_SPACE = 20.0  # px: repulsion acts only within this radius
+FEEDING_STEER_CLAMP = 1.5      # cap on the combined feeding vector before it is
+                               #     blended with terrain/wander (keeps it from
+                               #     swamping obstacle avoidance)
+
+_PLANT_SOFT_SQ = PLANT_SOFT_RADIUS ** 2
+_PERSONAL_SPACE_SQ = ANIMAL_PERSONAL_SPACE ** 2
+_MIN_DIST_SQ = 1.0             # closer than ~1px counts as "overlapping"
+
+# Flip on to record per-model steering debug data (drawn by main.py when on).
+# Off by default: when False, decide() does zero extra work.
+DEBUG_SOCIAL_STEERING = False
+
+# ----------------------------------------------------------------------
 # Models
 # ----------------------------------------------------------------------
 class DecisionModel:
@@ -161,7 +189,7 @@ class TerrainDecisionModel(DecisionModel):
         # avoidance dominates when terrain is close, otherwise the wander shows
         return _safe_normalize(steer * organism.genome.terrain_avoidance + self._wander)
 
-class NutrientDecisionModel(TerrainDecisionModel):
+class NutrientDecisionModel(RandomDecisionModel):
     name = "nutrient"
 
     def __init__(self):
@@ -172,31 +200,69 @@ class NutrientDecisionModel(TerrainDecisionModel):
         p_steer = _particle_steer(organism, world)
         return _safe_normalize(base + p_steer)
 
-class CellAwareDecisionModel(TerrainDecisionModel):
-    """Level 2 -- everything Level 1 does, and it *perceives* nearby organisms.
-    It does not act on them yet (no attraction, no predator/prey). The perceived
-    set is stored on the model for the levels above (and for debugging)."""
+class CellAwareDecisionModel(NutrientDecisionModel):
+    """Cell-aware tier (reached via 3A/3B) -- everything Terrain does, PLUS it
+    perceives nearby organisms and acts on the cell-wall distinction: it is
+    drawn toward plant cells (walled) and keeps personal space from other
+    animal cells (unwalled), via _feeding_steer. Higher levels then add their
+    genome-driven social layer on top of this.
+
+    NOTE (behavioural change): this model used to be awareness-only ("perceives
+    but does not act"). It now contributes feeding/spacing steering. Because
+    AttractionDecisionModel (3A) and SizeAwareDecisionModel (3B) call
+    super().decide(), they inherit that steering too -- *combined with*, not
+    replacing, their existing cell_attraction / size genes. If you want to keep
+    3A/3B untouched, move the two feeding lines below into a dedicated sibling
+    model and give it its own intelligence level in the factory instead.
+    """
     name = "cell_aware"
 
     def __init__(self):
         super().__init__()
         self.perceived = []
+        self.debug_info = None  # populated only when DEBUG_SOCIAL_STEERING
 
     def decide(self, organism, world):
-        self.perceived = _perceived_cells(organism)  # awareness only
-        return super().decide(organism, world)
+        self.perceived = _perceived_cells(organism)
+        base = super().decide(organism, world)           # terrain / wander
+        final = _safe_normalize(base)
+
+        if DEBUG_SOCIAL_STEERING:
+            self.debug_info = {
+                "base": base,
+                "final": final,
+                "n_plants": sum(1 for c in self.perceived if c.has_cell_wall),
+                "n_animals": sum(1 for c in self.perceived if not c.has_cell_wall),
+            }
+
+        return final
 
 
 class AttractionDecisionModel(CellAwareDecisionModel):
     """Level 3A -- a single genome.cell_attraction in [-1, 1] blends steering
-    toward (+) or away from (-) the perceived organisms, on top of terrain."""
+    toward (+) or away from (-) the perceived organisms, on top of terrain
+    (and, now, the cell-wall feeding/spacing steer from CellAwareDecisionModel)."""
     name = "attraction"
 
     def decide(self, organism, world):
-        base = super().decide(organism, world)  # terrain/wander + self.perceived
+        base = super().decide(organism, world)  # terrain/wander + feeding + perceived
         a = organism.genome.cell_attraction
         social = _weighted_social(organism, self.perceived, lambda other: a)
         return _safe_normalize(base + social)
+
+class TypeAwareDecisionModel(AttractionDecisionModel):
+    name = "type_aware"
+
+    def __init__(self):
+        super().__init__()
+
+    def decide(self, organism, world):
+        base = super().decide(organism, world)
+        weight = organism.genome.wall_cell_attraction
+        social = _weighted_social(organism, self.perceived, weight)
+
+        return _safe_normalize(base + social)
+
 
 
 class SizeAwareDecisionModel(CellAwareDecisionModel):
@@ -210,7 +276,7 @@ class SizeAwareDecisionModel(CellAwareDecisionModel):
     name = "size_aware"
 
     def decide(self, organism, world):
-        base = super().decide(organism, world)  # terrain/wander + self.perceived
+        base = super().decide(organism, world)  # terrain/wander + feeding + perceived
         g = organism.genome
 
         def weight(other):
@@ -234,7 +300,8 @@ _MODELS_BY_LEVEL = {
     2: NutrientDecisionModel,
     #2: CellAwareDecisionModel,
     3: AttractionDecisionModel,   # 3A
-    4: SizeAwareDecisionModel,    # 3B
+    4: TypeAwareDecisionModel,
+    #4: SizeAwareDecisionModel,    # 3B
 }
 
 
