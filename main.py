@@ -52,6 +52,11 @@ class Game:
         self.camera = Camera(type=0)
 
         self.player = Player((11500, 11500), self.space)
+        # plant_g = Genome(intelligence=-1)
+        # plant_g.has_cell_wall = True
+        # plant = Cell((11500, 11400), plant_g)
+        # self.space.add(plant.body, plant.shape)
+
 
         # mutations tracking
         self.previous_genome = self.player.cell.genome
@@ -60,6 +65,7 @@ class Game:
 
         self.cells = []
         self.cells.append(self.player.cell)
+        # self.cells.append(plant)
         self.previous_cell_length = 1
 
         # initial chunk (and hitbox) load around the player

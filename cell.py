@@ -50,6 +50,7 @@ class Genome:
         self.cell_attraction = 0.0  # 3A: single toward/away, [-1, 1]
         self.smaller_cell_attraction = 0.0  # 3B: response to smaller cells
         self.larger_cell_attraction = 0.0  # 3B: response to larger cells
+        self.wall_cell_attraction = 10.0
 
     def mutate_gene(self, env: EnvFeatures, cell):
         """Mutate this genome based on the environment (env) and the parent
@@ -200,7 +201,7 @@ class Cell:
         elif self.genome.intelligence == 2:
             self.max_energy += 500000
         elif self.genome.intelligence == 3:
-            self.max_energy += 5000000
+            self.max_energy += 50000
 
         # world tracking
         self.last_chunk_pos = None
