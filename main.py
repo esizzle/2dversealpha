@@ -1,10 +1,10 @@
-import pygame
-import pymunk
+
 from world_grid import *
 from camera import *
 from player import *
 from colors import *
 from profiler import Profiler
+from journal import Journal
 
 SCREEN_WIDTH = 1080
 SCREEN_HEIGHT = 720
@@ -16,6 +16,14 @@ MUT_BOX_W = 200
 MUT_BOX_H = 200
 SPECIES_BOX_W = 200
 SPECIES_BOX_H = 600
+JOURNAL_BOX_W = 200
+JOURNAL_BOX_H = 600
+
+# Seed the journal with a few placeholder rows at startup so the panel is
+# visible immediately. These are UI samples only -- they do NOT drive any game
+# mechanic. Set to False (or delete _seed_journal_demo) once the real
+# mutation-discovery hooks are wired in (see check_mutations below).
+JOURNAL_DEMO_SEED = False
 
 # energy gained per frame, by algae color and light level.
 # Green algae thrive near the surface, brown mid-depth, red in the deep.
@@ -34,7 +42,16 @@ class Game:
         self.mut_box_surface = pygame.Surface((MUT_BOX_W, MUT_BOX_H))
         self.species_box_surface = pygame.Surface((SPECIES_BOX_W, SPECIES_BOX_H))
 
-        self.font = pygame.font.SysFont("Arcade_Classic", 18)
+        self.font = pygame.font.SysFont("Arcade_Classic.ttf", 18)
+
+        # Mutation journal, mounted in the (currently unused) left slot -- the
+        # same position/size the species box reserves. It reuses the game font
+        # and owns its own surface, data and tab state (see journal.py).
+        self.journal = Journal(self.font, JOURNAL_BOX_W, JOURNAL_BOX_H)
+        self.journal_pos = ((SCREEN_WIDTH - WORLD_WINDOW_WIDTH) // 2 - 220,
+                            (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) // 2)
+        if JOURNAL_DEMO_SEED:
+            self._seed_journal_demo()
 
         # World (chunk-based)
         self.world = World()
@@ -96,6 +113,12 @@ class Game:
                     self.profiler.overlay = not self.profiler.overlay  # toggle overlay
                 elif event.key == pygame.K_F4:
                     self.profiler.request_deep_profile()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # forward left-clicks to the journal in its local coordinates
+                # (screen click minus the panel's top-left) so its tabs are
+                # clickable. Returns True if a tab was hit; otherwise ignored.
+                jx, jy = self.journal_pos
+                self.journal.handle_click((event.pos[0] - jx, event.pos[1] - jy))
 
         # camera inputs
         self.camera.handle_input(events, keys)
@@ -127,14 +150,19 @@ class Game:
         if genome is self.previous_genome:
             return
 
+        env = self.world.get_env_features(self.player.cell.body.position)
+
         self.increased.clear()
         self.decreased.clear()
 
         max_mass = genome.max_mass - self.previous_genome.max_mass
         if max_mass > 0:
             self.increased.append("MAX MASS")
+            self.journal.add_environmental_mutation("Water", "Increased Size")
+
         elif max_mass < 0:
             self.decreased.append("MAX MASS")
+            self.journal.add_environmental_mutation("Sand", "Decreased Size")
 
         size = genome.size - self.previous_genome.size
         if size > 0:
@@ -145,6 +173,7 @@ class Game:
         speed = genome.max_speed - self.previous_genome.max_speed
         if speed > 0:
             self.increased.append("SPEED")
+            self.journal.add_behavioural_mutation("Eats Cells", "Speed")
         elif speed < 0:
             self.decreased.append("SPEED")
 
@@ -152,10 +181,27 @@ class Game:
             if genome.has_cell_wall:
                 self.increased.append("EVOLVED CELL WALL")
                 self.decreased.append("CAN NO LONGER MOVE")
+                self.journal.add_behavioural_mutation("Doesn't Move", "Cell Wall")
 
         if genome.has_chloroplast != self.previous_genome.has_chloroplast:
             if genome.has_chloroplast:
                 self.increased.append("EVOLVED CHLOROPLAST")
+                self.journal.add_environmental_mutation("Sunny + Cell Wall", "Chloroplast")
+
+        # ---- JOURNAL HOOK ------------------------------------------------
+
+        # This is where the player's real discovered mutations are detected.
+        # To log them, call self.journal.add_environmental_mutation(env, mut)
+        # or self.journal.add_behavioural_mutation(beh, mut). `mut` is the label
+        # above (e.g. "EVOLVED CHLOROPLAST"); the pressure string comes from the
+        # environment the split happened in -- get it with
+        #   env = self.world.get_env_features(self.player.cell.body.position)
+        # and map env.chunk_material / env.light_level / env.has_particles (see
+        # Genome.mutate_gene in cell.py) to a human-readable pressure. Behaviour
+        # rows pair the decision model's .name change (decision_models.py) with
+        # the intelligence/behaviour gene that unlocked it. Duplicates are
+        # rejected by the journal, so it's safe to call every frame.
+        # ------------------------------------------------------------------
 
         self.previous_genome = genome
 
@@ -216,6 +262,20 @@ class Game:
         self.screen.blit(self.species_box_surface, ((SCREEN_WIDTH - WORLD_WINDOW_WIDTH) // 2 - 220,
                                                     (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) // 2))
 
+    def draw_journal(self):
+        # journal owns its surface + layout; we just blit it into the left slot
+        self.screen.blit(self.journal.render(), self.journal_pos)
+
+    def _seed_journal_demo(self):
+        # Placeholder rows so the panel shows something on first run. UI-only:
+        # these are NOT game mechanics. Remove this method (and its call) once
+        # real discovered mutations are pushed in via the hooks below.
+        self.journal.add_environmental_mutation("Nutrient Poor", "Increased Detection Radius")
+        self.journal.add_environmental_mutation("Sand", "Reduced Cell Size")
+        self.journal.add_environmental_mutation("Low Light", "Increased Chloroplast Efficiency")
+        self.journal.add_behavioural_mutation("Random Movement", "Terrain Detection")
+        self.journal.add_behavioural_mutation("Terrain Avoidance", "Cell Detection")
+
     def draw_game_world(self):
         self.world_surface.fill(BLACK)
 
@@ -252,9 +312,11 @@ class Game:
         with self.profiler.section("render_ui"):
             self.draw_stat_box()
             self.draw_mut_box()
+            self.draw_journal()
             self.create_box_label("Game World", (SCREEN_WIDTH / 2 - 16, 55))
             self.create_box_label("Player Stats", ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + STAT_BOX_W) // 2 - 15, 55))
             self.create_box_label("Mutations", ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + STAT_BOX_W) // 2 - 10, 375))
+            self.create_box_label("Mutation Journal", (self.journal_pos[0] + 50, 55))
 
         self.profiler.draw_overlay(self.screen, self.font, topleft=(8, 8))  # overlay on top
 

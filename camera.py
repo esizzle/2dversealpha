@@ -1,7 +1,5 @@
 import pygame
 
-from world_grid import LVL1_CHUNK_SIZE, CELL_SIZE
-
 
 class Camera:
     def __init__(self, type = 1, position = (0,0), zoom = 1.0, rotation = 0):

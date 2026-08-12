@@ -1,5 +1,4 @@
-import pygame
-import pymunk
+
 from cell import *
 
 

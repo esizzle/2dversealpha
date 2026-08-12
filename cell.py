@@ -4,9 +4,8 @@ import uuid
 import pygame
 import math
 import random
-import pymunk
 
-from colors import GREEN, BLACK, LIME, ORANGE, RED
+from colors import  BLACK, LIME, ORANGE, RED
 from env_features import EnvFeatures
 from physics_object import *
 from world_grid import WaterCell, Particle

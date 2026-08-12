@@ -30,7 +30,7 @@ import random
 
 from pymunk import Vec2d
 
-from world_grid import SandCell, WaterCell
+from world_grid import SandCell
 
 
 # ----------------------------------------------------------------------
