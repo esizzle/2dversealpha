@@ -29,12 +29,13 @@ to call render() once per frame from Game.render().
 import pygame
 
 from colors import BLACK
+from colors import BORDER
 
 # UI text colours. These mirror the literals main.py already uses for panel
 # text (create_box_label uses (0, 255, 0); draw_mut_box uses (0, 255, 0) /
 # (100, 100, 100) / white) so the journal reads as part of the same UI, not a
 # bolted-on widget. Swap these for named colours from colors.py when polishing.
-_OUTLINE = (255, 255, 255)     # panel border + separators, like every other box
+_OUTLINE = BORDER   # panel border + separators, like every other box
 _ACTIVE = (0, 255, 0)          # selected tab + column headers (matches labels)
 _INACTIVE = (100, 100, 100)    # unselected tab, empty-state + overflow text
 _ROW = (255, 255, 255)         # discovered-mutation rows

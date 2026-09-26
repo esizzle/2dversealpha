@@ -1,0 +1,17 @@
+# python
+__pycache__/
+*.pyc
+
+# PyInstaller output and the build venv (see build.ps1)
+build/
+dist/
+release/
+.venv-build/
+2dverse.log
+
+# IDE (workspace.xml churns on every run)
+.idea/workspace.xml
+
+# old / superseded audio
+assets/audio/music/background1.ogg
+assets/audio/music/background_full.ogg

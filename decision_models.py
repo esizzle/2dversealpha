@@ -159,6 +159,14 @@ class DecisionModel:
         Must not mutate the organism's physical state."""
         raise NotImplementedError
 
+    def seed_heading(self, direction):
+        """Optional hint: the organism is already travelling along `direction`
+        (a unit (x, y)), e.g. a daughter cell leaving a split. Models that keep
+        a wander heading adopt it, so they carry on the way they were going
+        instead of turning on the spot. Still direction-only -- a model never
+        touches physics. Default: ignore the hint."""
+        pass
+
 
 class RandomDecisionModel(DecisionModel):
     """Level 0 -- no perception. A slow random walk, the baseline for organisms
@@ -172,6 +180,9 @@ class RandomDecisionModel(DecisionModel):
         if random.random() < 0.01:  # repick occasionally -> wander, not jitter
             self._heading = _random_unit()
         return self._heading
+
+    def seed_heading(self, direction):
+        self._heading = Vec2d(direction[0], direction[1])
 
 
 class TerrainDecisionModel(DecisionModel):
@@ -188,6 +199,9 @@ class TerrainDecisionModel(DecisionModel):
         steer = _terrain_steer(organism, world)
         # avoidance dominates when terrain is close, otherwise the wander shows
         return _safe_normalize(steer * organism.genome.terrain_avoidance + self._wander)
+
+    def seed_heading(self, direction):
+        self._wander = Vec2d(direction[0], direction[1])
 
 class NutrientDecisionModel(RandomDecisionModel):
     name = "nutrient"
@@ -259,7 +273,10 @@ class TypeAwareDecisionModel(AttractionDecisionModel):
     def decide(self, organism, world):
         base = super().decide(organism, world)
         weight = organism.genome.wall_cell_attraction
-        social = _weighted_social(organism, self.perceived, weight)
+        # only walled (plant) cells pull on this organism; unwalled cells
+        # are handled by the cell_attraction gene in the parent model
+        social = _weighted_social(organism, self.perceived,
+                                  lambda other: weight if other.has_cell_wall else 0.0)
 
         return _safe_normalize(base + social)
 

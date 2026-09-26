@@ -1,3 +1,4 @@
+from resources import APP_NAME, APP_VERSION, redirect_output_when_frozen
 
 from world_grid import *
 from camera import *
@@ -5,6 +6,9 @@ from player import *
 from colors import *
 from profiler import Profiler
 from journal import Journal
+from settings import SettingsPanel, SettingsTab
+from audio import audio
+from sim_clock import sim_clock
 
 SCREEN_WIDTH = 1080
 SCREEN_HEIGHT = 720
@@ -19,11 +23,23 @@ SPECIES_BOX_H = 600
 JOURNAL_BOX_W = 200
 JOURNAL_BOX_H = 600
 
+# Screen-space HUD chrome (fixed to the application window, never the world).
+HUD_PAD = 8              # padding from the screen edges for the FPS counter / tab
+SETTINGS_TAB_W = 90
+SETTINGS_TAB_H = 26
+
 # Seed the journal with a few placeholder rows at startup so the panel is
 # visible immediately. These are UI samples only -- they do NOT drive any game
 # mechanic. Set to False (or delete _seed_journal_demo) once the real
 # mutation-discovery hooks are wired in (see check_mutations below).
 JOURNAL_DEMO_SEED = False
+
+# Performance cull: while the measured frame rate is below FPS_CULL_THRESHOLD,
+# one random non-player cell is killed, at most once every FPS_CULL_COOLDOWN
+# seconds, until the frame rate recovers. Set the cooldown to 0 to cull on
+# every slow frame.
+FPS_CULL_THRESHOLD = 55
+FPS_CULL_COOLDOWN = 0.25
 
 # energy gained per frame, by algae color and light level.
 # Green algae thrive near the surface, brown mid-depth, red in the deep.
@@ -42,7 +58,16 @@ class Game:
         self.mut_box_surface = pygame.Surface((MUT_BOX_W, MUT_BOX_H))
         self.species_box_surface = pygame.Surface((SPECIES_BOX_W, SPECIES_BOX_H))
 
-        self.font = pygame.font.SysFont("Arcade_Classic.ttf", 18)
+        # HUD font. This has always rendered with pygame's bundled default
+        # font: the old call was SysFont("assets/fonts/Arcade_Classic.ttf")
+        # and SysFont takes a *font name*, so the unknown name silently fell
+        # back to the default. Font(None, ...) asks for that default font
+        # explicitly, so the build looks exactly like the dev version and
+        # does not depend on the fonts installed on the player's machine.
+        # To switch to Arcade Classic later:
+        #   pygame.font.Font(resource_path("assets/fonts/Arcade_Classic.ttf"), 18)
+        # (glyph metrics change, so the hard-coded HUD offsets need a pass).
+        self.font = pygame.font.Font(None, 18)
 
         # Mutation journal, mounted in the (currently unused) left slot -- the
         # same position/size the species box reserves. It reuses the game font
@@ -52,6 +77,20 @@ class Game:
                             (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) // 2)
         if JOURNAL_DEMO_SEED:
             self._seed_journal_demo()
+
+        # Right-hand HUD slot: the Player Stats box lives here, and the
+        # Settings panel takes over the exact same slot while it is open
+        # (see render()). One position, two panels, never both at once.
+        self.stat_box_pos = ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH) // 2 + 20,
+                             (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) // 2)
+        self.settings = SettingsPanel(self.font, STAT_BOX_W, STAT_BOX_H)
+        self._build_settings()
+        # the tab sits in the top-right corner of the window, right-aligned
+        # with the slot below it, fixed in screen space
+        self.settings_tab = SettingsTab(
+            self.font,
+            (self.stat_box_pos[0] + STAT_BOX_W - SETTINGS_TAB_W, HUD_PAD,
+             SETTINGS_TAB_W, SETTINGS_TAB_H))
 
         # World (chunk-based)
         self.world = World()
@@ -65,6 +104,19 @@ class Game:
         self.handler = self.space.add_collision_handler(1, 2)
         self.handler.begin = self.on_cell_begin
         self.handler.separate = self.on_cell_separate
+
+        # walled <-> walled: only needed so two walled daughters can overlap
+        # while they split (see on_walled_pair_begin). Unwalled <-> unwalled
+        # needs nothing: those shapes share ShapeFilter group 1 and never
+        # collide with each other in the first place.
+        self.walled_handler = self.space.add_collision_handler(2, 2)
+        self.walled_handler.begin = self.on_walled_pair_begin
+
+        # play a sound when a cell (walled or not, types 1/2) bumps into sand
+        # (type 3). begin fires once per contact, so it isn't spammed per frame.
+        for cell_type in (1, 2):
+            sand_handler = self.space.add_collision_handler(cell_type, 3)
+            sand_handler.begin = self.on_sand_begin
 
         self.camera = Camera(type=0)
 
@@ -91,46 +143,105 @@ class Game:
 
         self.to_remove_particles = []
         self.running = True
+        self.next_fps_cull = 0.0  # sim_clock time the next performance cull is allowed
 
         self.profiler = Profiler(window=60)
 
     def init_pygame(self):
         pygame.init()
+        # bring up the mixer and load audio once, right after pygame.init()
+        audio.init()
+        pygame.display.set_caption(f"{APP_NAME} - {APP_VERSION}")
         screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         clock = pygame.time.Clock()
         return screen, clock
+
+    # ------------------------------------------------------------------
+    # Settings
+    # ------------------------------------------------------------------
+    def _build_settings(self):
+        """Populate the Settings panel. Every option is a getter/setter (or
+        callback) pair, so the panel never touches audio / game state itself.
+        To add an option later (fullscreen, sim speed, UI scale, ...), add a
+        control here -- the panel lays them out top-to-bottom."""
+        # Volumes: the panel shows the live value from the audio manager and
+        # writes back through its existing set_* API, so changes are
+        # immediate and every SFX call site inherits the new master volume.
+        self.settings.add_slider("MUSIC VOLUME",
+                                 get=lambda: audio.music_volume,
+                                 set=audio.set_music_volume)
+        self.settings.add_slider("SFX VOLUME",
+                                 get=lambda: audio.sfx_volume,
+                                 set=audio.set_sfx_volume)
+        # Quit goes through the normal shutdown: running=False ends the
+        # main loop, which calls pygame.quit() exactly as the window's close
+        # button does.
+        self.settings.add_button("Quit Application", self.quit,
+                                 accent=(255, 0, 0), bottom=True)
+
+    def toggle_settings(self):
+        self.settings.toggle()
+
+    def quit(self):
+        self.running = False
 
     def handle_inputs(self):
         # inputs
         events = pygame.event.get()
         keys = pygame.key.get_pressed()
 
+        # events the HUD consumed are withheld from the camera / player below,
+        # so a click or scroll on the Settings panel never reaches the world
+        world_events = []
+
         for event in events:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_F3:
+                if event.key == pygame.K_ESCAPE:
+                    # ESC toggles Settings; it never quits (Quit lives in the panel)
+                    self.toggle_settings()
+                    continue
+                elif event.key == pygame.K_F3:
                     self.profiler.overlay = not self.profiler.overlay  # toggle overlay
                 elif event.key == pygame.K_F4:
                     self.profiler.request_deep_profile()
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # forward left-clicks to the journal in its local coordinates
-                # (screen click minus the panel's top-left) so its tabs are
-                # clickable. Returns True if a tab was hit; otherwise ignored.
-                jx, jy = self.journal_pos
-                self.journal.handle_click((event.pos[0] - jx, event.pos[1] - jy))
+            elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
+                                pygame.MOUSEMOTION):
+                # 1. the Settings tab (always visible, always clickable)
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
+                        and self.settings_tab.hit(event.pos):
+                    self.toggle_settings()
+                    continue
+                # 2. the Settings panel, while open, owns the right-hand slot
+                if self.settings.handle_event(event, self.stat_box_pos):
+                    continue
+                # 3. forward left-clicks to the journal in its local coordinates
+                #    (screen click minus the panel's top-left) so its tabs are
+                #    clickable. Returns True if a tab was hit; otherwise ignored.
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    jx, jy = self.journal_pos
+                    self.journal.handle_click((event.pos[0] - jx, event.pos[1] - jy))
+            world_events.append(event)
 
         # camera inputs
-        self.camera.handle_input(events, keys)
+        self.camera.handle_input(world_events, keys)
         # player inputs
         for cell in self.cells:
             if cell.is_player:
-                cell.handle_input(events, keys)
+                cell.handle_input(world_events, keys)
 
     def on_cell_begin(self, arbiter, space, data):
         a, b = arbiter.shapes
         predator_cell = a._object
         prey_cell = b._object
+
+        # an unwalled + walled daughter pair still pulling apart: ignore the
+        # contact (no push, no contact-damage timer). Returning False from
+        # begin makes pymunk ignore this pair until the shapes stop touching,
+        # which is exactly when the split completes -- nothing to restore.
+        if predator_cell.is_split_sibling_of(prey_cell):
+            return False
 
         predator_cell.contact_time[prey_cell] = 0.0
         return True
@@ -141,6 +252,32 @@ class Game:
         prey_cell = b._object
 
         predator_cell.contact_time.pop(prey_cell, None)
+
+    def on_walled_pair_begin(self, arbiter, space, data):
+        # two walled daughters mid-split may overlap each other; every other
+        # walled <-> walled contact collides as normal
+        a, b = arbiter.shapes
+        return not a._object.is_split_sibling_of(b._object)
+
+    def on_sand_begin(self, arbiter, space, data):
+        # a cell just touched a sand block -- play the collision sound at the
+        # cell's world position (shape order matches the handler: cell, sand)
+        # and let pymunk resolve the collision normally (return True)
+        cell_shape, _ = arbiter.shapes
+        cell = getattr(cell_shape, "_object", None)
+        position = cell.body.position if cell is not None else cell_shape.body.position
+        audio.play_collide_sand(position)
+        return True
+
+    # ------------------------------------------------------------------
+    # Audio listener
+    # ------------------------------------------------------------------
+    def update_audio_listener(self):
+        """Tell the audio system where the player is listening from: the
+        world-space centre of the camera view plus the current zoom. Called
+        once per frame; all per-sound culling/attenuation reads this cache."""
+        lx, ly = self.camera.world_center(WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT)
+        audio.set_listener(lx, ly, self.camera.zoom, WORLD_WINDOW_WIDTH / 2)
 
     # ------------------------------------------------------------------
     # Mutation tracking (game logic — runs in update, not in render)
@@ -230,14 +367,18 @@ class Game:
         self.draw_stat_bar(self.player.cell.energy, self.player.cell.max_energy, "ENERGY", "nJ", 62, 1000)
 
         # OUTLINE
-        pygame.draw.rect(self.stat_box_surface, (255, 255, 255), (0, 0, STAT_BOX_W, STAT_BOX_H), 1)
+        pygame.draw.rect(self.stat_box_surface, BORDER, (0, 0, STAT_BOX_W, STAT_BOX_H), 1)
 
-        self.screen.blit(self.stat_box_surface, ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH) // 2 + 20,
-                                                 (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) // 2))
+        self.screen.blit(self.stat_box_surface, self.stat_box_pos)
+
+    def draw_settings_panel(self):
+        # settings owns its surface + layout; it is blitted into the SAME slot
+        # as the stat box, so opening it visually replaces Player Stats
+        self.screen.blit(self.settings.render(), self.stat_box_pos)
 
     def draw_mut_box(self):
         self.mut_box_surface.fill(BLACK)
-        pygame.draw.rect(self.mut_box_surface, (255, 255, 255), (0, 0, MUT_BOX_W, MUT_BOX_H), 1)
+        pygame.draw.rect(self.mut_box_surface, BORDER, (0, 0, MUT_BOX_W, MUT_BOX_H), 1)
 
         # increases first, then decreases directly below them
         for i, name in enumerate(self.increased):
@@ -287,38 +428,63 @@ class Game:
             cell.draw(self.world_surface, self.camera.zoom, self.camera.offset)
 
         # WORLD BOX
-        pygame.draw.rect(self.world_surface, (255, 255, 255), (0, 0, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT), 1)
-
-        fps = self.clock.get_fps()
-        fps_text = self.font.render(f"FPS: {fps:.0f}", True, (255, 255, 255))
-        self.world_surface.blit(fps_text, (10, 10))
+        pygame.draw.rect(self.world_surface, BORDER, (0, 0, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT), 1)
 
         self.screen.blit(self.world_surface,
                          ((SCREEN_WIDTH - WORLD_WINDOW_WIDTH) / 2, (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) / 2))
 
-    def create_box_label(self, text, top_left):
+    def draw_fps(self):
+        # screen-space: top-left of the application window, outside the world
+        # viewport, so it is unaffected by camera position / zoom
+        fps = self.clock.get_fps()
+        fps_text = self.font.render(f"FPS: {fps:.0f}", True, (0,255,0))
+        fps_rect = fps_text.get_rect(topleft=(HUD_PAD, HUD_PAD))
+        # self.screen is never cleared (each panel repaints only its own box),
+        # so paint a background first or successive frames stack on top of
+        # each other -- same trick create_box_label / the profiler overlay use
+        pygame.draw.rect(self.screen, BLACK, fps_rect.inflate(6, 4))
+        self.screen.blit(fps_text, fps_rect)
+
+    def draw_hud_chrome(self):
+        """Fixed screen-space HUD: FPS counter (top-left) and the Settings tab
+        (top-right). Drawn after the panels so they always sit on top."""
+        #self.draw_fps()
+        self.settings_tab.render(self.screen, pygame.mouse.get_pos(), self.settings.is_open)
+
+    def create_box_label(self, text, top_left, clear_width=None):
         label = self.font.render(text, True, (0, 255, 0))
         label_rect = label.get_rect(topleft=top_left)
-        pygame.draw.rect(
-            self.screen,
-            BLACK,
-            label_rect.inflate(6, 4)
-        )
+        # background: the screen is never cleared, so this is what erases the
+        # previous frame's label. `clear_width` lets a label that changes text
+        # (Player Stats <-> Settings) wipe the widest version it can show.
+        clear_rect = label_rect.inflate(6, 4)
+        if clear_width is not None:
+            clear_rect.width = max(clear_rect.width, clear_width + 6)
+        pygame.draw.rect(self.screen, BLACK, clear_rect)
         self.screen.blit(label, label_rect)
 
     def render(self):
         with self.profiler.section("render_world"):
             self.draw_game_world()
         with self.profiler.section("render_ui"):
-            self.draw_stat_box()
+            # right-hand slot: Settings replaces Player Stats while it is open
+            slot_label_pos = ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + STAT_BOX_W) // 2 - 15, 55)
+            if self.settings.is_open:
+                self.draw_settings_panel()
+            else:
+                self.draw_stat_box()
             self.draw_mut_box()
             self.draw_journal()
             self.create_box_label("Game World", (SCREEN_WIDTH / 2 - 16, 55))
-            self.create_box_label("Player Stats", ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + STAT_BOX_W) // 2 - 15, 55))
+            self.create_box_label("Settings" if self.settings.is_open else "Player Stats", slot_label_pos,
+                                  clear_width=self.font.size("Player Stats")[0])
             self.create_box_label("Mutations", ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + STAT_BOX_W) // 2 - 10, 375))
             self.create_box_label("Mutation Journal", (self.journal_pos[0] + 50, 55))
+            self.draw_hud_chrome()
 
-        self.profiler.draw_overlay(self.screen, self.font, topleft=(8, 8))  # overlay on top
+        # overlay on top, just below the FPS counter so the two don't collide
+        self.profiler.draw_overlay(self.screen, self.font,
+                                   topleft=(HUD_PAD, HUD_PAD + self.font.get_height() + 4))
 
         pygame.display.flip()
         self.clock.tick(60)
@@ -334,6 +500,21 @@ class Game:
         self.cells.remove(cell)
         self.space.remove(cell.body, cell.shape)
 
+    def cull_for_fps(self):
+        """Population control: if the frame rate has dropped below
+        FPS_CULL_THRESHOLD, mark one random non-player cell as dead. It then
+        goes through the normal death path later this same update (dropped
+        particles, kill_cell), exactly like a starved cell."""
+        fps = self.clock.get_fps()
+        # get_fps() averages the last 10 frames and reads 0 until it has them,
+        # so 0 means "not measured yet", not "slow"
+        if fps == 0 or fps >= FPS_CULL_THRESHOLD or sim_clock.now < self.next_fps_cull:
+            return
+        candidates = [cell for cell in self.cells if not cell.is_player and not cell.is_dead]
+        if candidates:
+            random.choice(candidates).is_dead = True
+            self.next_fps_cull = sim_clock.now + FPS_CULL_COOLDOWN
+
     def respawn_particles(self, dt):
         for chunk in self.world.loaded_lvl1chunks:
             lvl1chunk = self.world.lvl1chunks[chunk]
@@ -348,7 +529,18 @@ class Game:
     def update(self):
         dt = 1 / 60
 
+        # simulated time, advanced by the same fixed dt as the physics step.
+        # Cell.invulnerable_until is stamped against this clock.
+        sim_clock.tick(dt)
+
+        # too slow? thin the population by one random non-player cell
+        self.cull_for_fps()
+
         with self.profiler.section("physics"):
+            # refresh the audio listener BEFORE physics so the sand-collision
+            # callbacks fired inside space.step() are judged against this
+            # frame's camera position/zoom
+            self.update_audio_listener()
             self.space.step(dt)
             if self.camera.type == 1:
                 self.camera.update(width=WORLD_WINDOW_WIDTH, height=WORLD_WINDOW_HEIGHT)
@@ -364,7 +556,10 @@ class Game:
 
                 # EnvFeatures is only consumed by split() and photosynthesis, so
                 # build it lazily instead of once per cell per frame. (Phase 1 opt)
-                will_split = cell.mass >= cell.max_mass and cell.energy >= cell.max_energy
+                # A cell that is still pulling apart from its sibling can't
+                # start another split.
+                will_split = (cell.mass >= cell.max_mass and cell.energy >= cell.max_energy
+                              and not cell.is_splitting)
                 env = None
                 if will_split or cell.has_chloroplast:
                     env = self.world.get_env_features(cell.body.position)
@@ -374,10 +569,16 @@ class Game:
                     self.player.cell = cell
                     self.world.process(cell.body.position, self.space)
                     self.camera.update(cell.body, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT)
-                else:
+                elif not cell.is_splitting:
                     if cell.genome.intelligence >= 0:
                         direction = cell.decision_model.decide(cell, self.world)
                         cell.apply_movement(direction)
+
+                # mitosis: a splitting daughter slides away from its sibling
+                # until the two no longer overlap (input / AI are paused for
+                # it until then -- see Cell.update_split)
+                if cell.is_splitting:
+                    cell.update_split(dt)
 
                 # cell reproduction (children spawn into new_cells)
                 if will_split:
@@ -398,10 +599,15 @@ class Game:
 
                 # death by contact
                 for other in cell.contact_time:
+                    if other.is_invulnerable():
+                        # can't be hurt right now: hold the timer at zero so
+                        # it doesn't die the instant its protection ends
+                        cell.contact_time[other] = 0.0
+                        continue
                     cell.contact_time[other] += dt
                     cell.total_contact_time += dt
-                    if cell.contact_time[other] >= 1:
-                        other.is_dead = True
+                    if cell.contact_time[other] >= 0.3:
+                        other.kill(cell)
 
                 # death by consumption
                 for entity in cell.nearby_entities:
@@ -430,6 +636,8 @@ class Game:
             self.to_remove_particles.clear()
 
     def main_game_loop(self):
+        # start the looping background soundtrack once, as the game begins
+        audio.play_music()
         while self.running:
             self.handle_inputs()
             self.profiler.maybe_deep_profile(self.update)  # was: self.update()
@@ -442,5 +650,8 @@ class Game:
         pygame.quit()
 
 if __name__ == "__main__":
+    # in a windowed PyInstaller build there is no console: send prints and
+    # tracebacks to 2dverse.log next to the exe (no-op when run from source)
+    redirect_output_when_frozen()
     game = Game()
     game.main_game_loop()

@@ -19,6 +19,18 @@ class Camera:
             self.y = (obj.position[1] * self.zoom) - height / 2
             self.offset = -self.x, -self.y
 
+    def screen_to_world(self, screen_x, screen_y):
+        """Inverse of the draw transform (screen = world * zoom + offset,
+        offset = (-x, -y)) for a point in world-window pixel coordinates."""
+        return (screen_x + self.x) / self.zoom, (screen_y + self.y) / self.zoom
+
+    def world_center(self, width, height):
+        """World-space point at the centre of a `width` x `height` view.
+        This is the audio listener position: in follow mode (type 0) it is
+        exactly the followed body's position; in free mode (type 1) it is
+        wherever the player has panned the view to."""
+        return self.screen_to_world(width / 2, height / 2)
+
 
     def handle_input(self, events, keys):
         for event in events:

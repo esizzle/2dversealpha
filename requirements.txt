@@ -1,0 +1,5 @@
+# Runtime dependencies for 2dverse.
+# pymunk must stay on 6.x: the game uses Space.add_collision_handler, which
+# pymunk 7.0 removed (replaced by Space.on_collision).
+pygame>=2.5,<3
+pymunk>=6.4,<7

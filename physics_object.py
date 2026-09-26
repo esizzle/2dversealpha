@@ -24,10 +24,14 @@ def init_cell_physics(mass, size, position, has_cell_wall = False):
 
 # create body's for sand cells
 # TODO: Abstract to all materials
-def sand_body(position):
+# collision_type defaults to 0 (unclassified terrain, e.g. basalt). Sand is
+# tagged with type 3 by its caller so the game can hook cell<->sand contacts
+# (see the collision handlers in main.py). Cells themselves are 1/2 above.
+def sand_body(position, collision_type=0):
     moment = pymunk.moment_for_box(4, (40, 40))
     body = pymunk.Body(4, moment, pymunk.Body.STATIC)
     body.position = position
     shape = pymunk.Poly.create_box(body, (40, 40))
+    shape.collision_type = collision_type
 
     return body, shape
