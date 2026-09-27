@@ -24,11 +24,18 @@ together (size is the half-width of a walled square / the radius of a round
 cell), so linked cells sit edge against edge with no gap.
 """
 
+import math
 import random
 
 import pymunk
 
-from global_constants import SPLIT_SPEED, SPLIT_DRIFT_SPEED
+from global_constants import (
+    SPLIT_SPEED,
+    SPLIT_DRIFT_SPEED,
+    FUNGAL_SENSE_RADIUS,
+    FUNGAL_MIN_GRADIENT,
+    FUNGAL_DISTANCE_FALLOFF,
+)
 
 
 def join_distance(a, b):
@@ -112,7 +119,78 @@ def division_axis(body, min_speed):
     return local.rotated(body.angle)
 
 
-def begin_multicellular_split(parent, d1, d2, min_speed):
+# ----------------------------------------------------------------------
+# Growth direction: the ONLY thing plants and fungi do differently
+# ----------------------------------------------------------------------
+# Kinds of walled multicell, from existing traits only (no fungus gene):
+#   plant  = multicellular AND cell wall AND chloroplast
+#   fungus = multicellular AND cell wall AND NOT chloroplast
+def is_multicellular_walled(cell):
+    return cell.multicellular and cell.has_cell_wall
+
+
+def is_fungal(cell):
+    return is_multicellular_walled(cell) and not cell.has_chloroplast
+
+
+def food_gradient(cell, world):
+    """Cheap, local pseudo food gradient around ONE cell (the one splitting).
+
+    Reads the food particles in a fixed (2R+1)^2 window of grid cells around
+    the cell (R = FUNGAL_SENSE_RADIUS) straight from the world grid, where
+    particles live on their WaterCell -- no global search, no joints, nothing
+    from the rest of the organism -- and sums
+
+        unit direction to particle * particle.multiplier / distance**k
+
+    with k = FUNGAL_DISTANCE_FALLOFF. A gentle falloff (0.5) lets closer food
+    count a bit more while a cluster still outweighs one nearby particle.
+
+    Returns a unit Vec2d, or None if there is no food in the window or the
+    food around the cell doesn't agree on a direction: the length of the sum
+    divided by the total weight (0 = pulls cancel out, 1 = all food on one
+    side) must be at least FUNGAL_MIN_GRADIENT."""
+    if world is None:
+        return None
+    here = cell.body.position
+    gx, gy = world.world_to_grid_cell(here)
+    r = FUNGAL_SENSE_RADIUS
+    k = FUNGAL_DISTANCE_FALLOFF
+    sx = sy = total = 0.0
+    for dx in range(-r, r + 1):
+        for dy in range(-r, r + 1):
+            grid_cell = world.get_lvl1_chunk_local_cell((gx + dx, gy + dy))
+            particles = getattr(grid_cell, "particles", None)
+            if not particles:
+                continue
+            for p in particles:
+                vx = p.x - here.x
+                vy = p.y - here.y
+                d = math.hypot(vx, vy)
+                if d < 1.0:
+                    continue          # sitting on it: no direction
+                w = p.multiplier / d ** k
+                sx += vx / d * w
+                sy += vy / d * w
+                total += w
+    if total <= 0.0 or math.hypot(sx, sy) < FUNGAL_MIN_GRADIENT * total:
+        return None
+    return pymunk.Vec2d(sx, sy).normalized()
+
+
+def growth_direction(parent, world, min_speed):
+    """World-space unit vector the outward daughter grows along.
+    plant  -> the parent's velocity axis (division_axis)
+    fungus -> its own local food gradient, falling back to the velocity
+              axis when there is no useful gradient."""
+    if is_fungal(parent):
+        towards_food = food_gradient(parent, world)
+        if towards_food is not None:
+            return towards_food
+    return division_axis(parent.body, min_speed)
+
+
+def begin_multicellular_split(parent, d1, d2, axis):
     """Start a multicellular division using the normal mitosis animation.
 
     Both daughters start on the parent's spot in the "splitting" state, so
@@ -129,12 +207,22 @@ def begin_multicellular_split(parent, d1, d2, min_speed):
 
     The parent's own velocity is NOT carried into the daughters: velocities
     are directional (d1 one way, d2 the other), never stacked on top of the
-    parent's drift, so a drifting plant that divides doesn't speed up."""
-    axis = division_axis(parent.body, min_speed)
+    parent's drift, so a drifting plant that divides doesn't speed up.
+
+    `axis` is the world-space unit growth direction (growth_direction).
+    Plants' axes run along the parent's own x/y axes, so the daughters keep
+    the parent's rotation. A fungal axis can point anywhere, so the
+    daughters are turned to face it -- that keeps the facing edges flush at
+    the normal joint length (joints are centre to centre, so turning d1
+    doesn't disturb the links it inherits)."""
     speed = parent.body.velocity.length
 
+    local = axis.rotated(-parent.body.angle)
+    on_own_axis = abs(abs(local.x) - 1.0) < 1e-6 or abs(abs(local.y) - 1.0) < 1e-6
+    angle = parent.body.angle if on_own_axis else math.atan2(axis.y, axis.x)
+
     for daughter in (d1, d2):
-        daughter.body.angle = parent.body.angle
+        daughter.body.angle = angle
         daughter.body.angular_velocity = parent.body.angular_velocity
     d1.body.velocity = (0.0, 0.0)             # parent's drift is not inherited
 

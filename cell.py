@@ -10,7 +10,8 @@ from env_features import EnvFeatures
 from physics_object import *
 from world_grid import WaterCell, Particle
 from decision_models import create_decision_model
-from multicell import begin_multicellular_split, finish_multicellular_split, remove_all_joints
+from multicell import (begin_multicellular_split, finish_multicellular_split,
+                       growth_direction, is_multicellular_walled, remove_all_joints)
 from audio import audio
 from sim_clock import sim_clock
 from global_constants import (
@@ -56,11 +57,11 @@ class Genome:
 
         # hard coded bounds
         # max_mass 10 -> 80
-        self.mass_range = [10, 80]
+        self.mass_range = [20, 80]
         # max_speed 20 -> 240
         self.speed_range = [20, 240]
         # max_size 5 -> 40
-        self.size_range = [5,40]
+        self.size_range = [10,40]
 
         # intelligence: which decision model this organism uses (0 = random
         # walk). Emerges under scarcity in mutate_gene, not handed out for free.
@@ -202,7 +203,7 @@ class Genome:
 
 
         # multicellularity
-        if len(cell.nearby_entities) > 4:
+        if len(cell.nearby_entities) > 3:
             for i in range(len(cell.nearby_entities)):
                 if random.random() < self.mutation_rate:
                     self.multicellular = True
@@ -258,11 +259,14 @@ class Cell:
         # world tracking
         self.last_chunk_pos = None
         self.last_grid_pos = None
+        self.grid_physics = None      # 'air' / 'surface' / None, set by World.update_entity
         self.neighboring_grid_cells = []
 
         # food
         self.nearby_particles = []
         self.nearby_entities = []
+        self.food_changed = False     # set by World.mark_food_changed
+        self.food_check_pos = None    # where food was last checked (None = check now)
         self.amt_type1_particles = 0
         self.amt_type2_particles = 0
 
@@ -282,6 +286,14 @@ class Cell:
             self.mass, self.size, position, self.has_cell_wall
         )
         self.shape._object = self
+
+        self._env = None
+        self._env_grid_pos = None
+        self.ai_direction = None          # last decision-model output (see main.py)
+        # random offset that staggers AI re-decisions and distance-based
+        # (level of detail) updates across cells, so they don't all land on
+        # the same frame
+        self.update_phase = random.randrange(1 << 16)
 
         # multicellular links: {neighbour Cell: pymunk.PinJoint}. The same
         # joint object is stored on both cells (see multicell.py).
@@ -367,25 +379,27 @@ class Cell:
 
         # (the K "kill my cell" debug key was removed for the alpha release)
 
-    def apply_movement(self, direction):
+    def apply_movement(self, direction, steps=1):
         """Act on a desired direction from this cell's decision model. AI cells
         call this; the player never does (player uses handle_input). Same rules
         as manual movement: a cell wall forbids it, and moving costs energy and
-        sets has_moved, so mutation rules stay identical for AI and player."""
+        sets has_moved, so mutation rules stay identical for AI and player.
+        `steps` > 1 when the cell is only updated every `steps` frames (far
+        from the player): the push and its energy cost cover all of them."""
         if self.has_cell_wall or self.is_splitting:
             return
         dx, dy = direction
         if dx == 0 and dy == 0:
             return
-        vx = self.body.velocity.x + dx * self.acceleration
-        vy = self.body.velocity.y + dy * self.acceleration
+        vx = self.body.velocity.x + dx * self.acceleration * steps
+        vy = self.body.velocity.y + dy * self.acceleration * steps
         speed = math.hypot(vx, vy)
         if speed > self.max_speed:
             scale = self.max_speed / speed
             vx *= scale
             vy *= scale
         self.body.velocity = (vx, vy)
-        self.add_energy(-self._movement_cost())
+        self.add_energy(-self._movement_cost() * steps)
         self.has_moved = True
 
     # ------------------------------------------------------------------
@@ -410,6 +424,15 @@ class Cell:
     # ------------------------------------------------------------------
     # Eating
     # ------------------------------------------------------------------
+    def refresh_nearby_particles(self, world):
+        """Rebuild the food list from the grid (after food nearby changed),
+        so eaten particles drop out and new ones show up."""
+        self.nearby_particles.clear()
+        for gx, gy in self.neighboring_grid_cells:
+            cell = world.get_lvl1_chunk_local_cell((gx, gy))
+            if cell and isinstance(cell, WaterCell):
+                self.nearby_particles.extend(cell.particles)
+
     def consume_particle(self, particle, removal_list):
         dx = particle.x - self.body.position.x
         dy = particle.y - self.body.position.y
@@ -421,6 +444,7 @@ class Cell:
                 self.mass = self.max_mass
                 self.add_energy(4000 * particle.multiplier)
 
+            particle.eaten = True
             removal_list.append(particle)
             # spatial: heard only if this cell is within the listener's radius
             audio.play_eat_particle(self.body.position)
@@ -478,7 +502,7 @@ class Cell:
     # ------------------------------------------------------------------
     # Reproduction / death
     # ------------------------------------------------------------------
-    def split(self, space, cell_list, env: EnvFeatures):
+    def split(self, space, cell_list, env: EnvFeatures, world=None):
         # clone genome, mutating each child based on the local environment
         new_genome1 = copy.deepcopy(self.genome)
         new_genome2 = copy.deepcopy(self.genome)
@@ -508,12 +532,16 @@ class Cell:
         space.add(new_cell1.body, new_cell1.shape)
         space.add(new_cell2.body, new_cell2.shape)
 
-        if self.multicellular and self.has_chloroplast:
+        if is_multicellular_walled(self):
             # multicellular division: same mitosis animation, but daughter 1
             # stays in the parent's place (and takes over its links) while
             # daughter 2 slides out along the velocity axis; the two are
             # joined when their edges meet (see multicell.py / update_split)
-            begin_multicellular_split(self, new_cell1, new_cell2, SPLIT_MIN_PARENT_SPEED)
+            # plants grow along their velocity, fungi toward their own local
+            # food gradient (see multicell.growth_direction); the rest of
+            # the division is shared
+            axis = growth_direction(self, world, SPLIT_MIN_PARENT_SPEED)
+            begin_multicellular_split(self, new_cell1, new_cell2, axis)
         else:
             # daughter 1 leaves along the parent's heading and picks the parent's
             # forward momentum back up; daughter 2 leaves the opposite way
@@ -569,6 +597,7 @@ class Cell:
 
             if isinstance(cell, WaterCell):
                 cell.add_particle(particle)
+                world.mark_food_changed((gx, gy))
             else:
                 print("Error, could not find Water Cell!")
 

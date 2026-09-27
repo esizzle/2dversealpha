@@ -192,6 +192,7 @@ WATER_SURFACE_DAMPING = 0.5 * 60  # px/s^2 applied at the water/air boundary
 class World:
     def __init__(self):
         self.loaded_lvl1chunks = set()
+        self.center_chunk = None      # lvl1 chunk the player is in (set by process)
         self.loaded_shapes = {}
         self.loaded_bodies = {}
 
@@ -440,18 +441,19 @@ class World:
     # ------------------------------------------------------------------
     def process(self, entity_pos, space):
         entity_tile_pos = self.world_to_lvl1_chunk(entity_pos)
+        self.center_chunk = entity_tile_pos
         self.load_chunks(entity_tile_pos, space)
         self.unload_distant_chunks(entity_tile_pos, space)
         self.update_solid_sand(space)
 
     def update_entity(self, entity, dt=1 / 60):
-        entity_grid_pos = self.world_to_grid_cell(entity.body.position)
-        self.handle_grid_physics(entity, entity_grid_pos, dt)
-        entity_chunk_pos = self.world_to_lvl1_chunk(entity.body.position)
-        if entity.last_chunk_pos != entity_chunk_pos:
-            entity.last_chunk_pos = entity_chunk_pos
+        x, y = entity.body.position            # read the body once per frame
+        entity_grid_pos = (int(x // CELL_SIZE), int(y // CELL_SIZE))
 
         if entity.last_grid_pos != entity_grid_pos:
+            # what kind of spot this is only changes with the grid cell, so
+            # classify it here instead of looking it up every frame
+            entity.grid_physics = self.grid_physics_kind(entity_grid_pos)
 
             # remove entity from previous grid cell
             if entity.last_grid_pos is not None:
@@ -474,6 +476,43 @@ class World:
 
             # get objects in entity neighbors
             entity.get_nearby_objects(self)
+            entity.food_check_pos = None      # new surroundings: check food now
+
+        # open water (the common case) needs nothing per frame
+        if entity.grid_physics is not None:
+            self.apply_grid_physics(entity, entity.grid_physics, dt)
+
+    def mark_food_changed(self, grid_pos):
+        """A particle appeared in / disappeared from this grid cell. Flag
+        every cell whose 3x3 neighbourhood includes it, so it rebuilds its
+        food list and checks it next update (see Game.update). Only a handful
+        of grid lookups, and only when food actually changes."""
+        gx, gy = int(grid_pos[0]), int(grid_pos[1])
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                grid_cell = self.get_lvl1_chunk_local_cell((gx + dx, gy + dy))
+                for entity in getattr(grid_cell, "entities", ()):
+                    entity.food_changed = True
+
+    def grid_physics_kind(self, grid_pos):
+        """'air' (gravity), 'surface' (water just below air: damping) or
+        None (nothing to do). Depends only on the grid cell."""
+        cell = self.get_lvl1_chunk_local_cell(grid_pos)
+        if isinstance(cell, AirCell):
+            return "air"
+        if isinstance(cell, WaterCell):
+            above = self.get_lvl1_chunk_local_cell((grid_pos[0], grid_pos[1] - 1))
+            if isinstance(above, AirCell):
+                return "surface"
+        return None
+
+    def apply_grid_physics(self, entity, kind, dt):
+        vx, vy = entity.body.velocity
+        if kind == "air":
+            entity.body.velocity = (vx, vy + AIR_GRAVITY * dt)
+        elif vy < 1:
+            # surface: dampen so the cell doesn't cross the water/air boundary
+            entity.body.velocity = (vx, min(0, vy + WATER_SURFACE_DAMPING * dt))
 
     def handle_grid_physics(self, entity, grid_pos, dt):
         self.air_ontop_water_phys(entity, grid_pos, dt)
@@ -784,6 +823,7 @@ class Particle:
     def __init__(self, world_pos, type=0):
         self.x, self.y = world_pos
         self.type = type
+        self.eaten = False     # set on the frame it is eaten, so no second cell can eat it
 
         if type == 0:
             self.multiplier = 1

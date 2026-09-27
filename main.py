@@ -11,7 +11,10 @@ from audio import audio
 from sim_clock import sim_clock
 from multicell import remove_all_joints
 from plant_defense import check_vertex_defense
-from global_constants import SHOW_CELL_JOINTS
+from global_constants import (SHOW_CELL_JOINTS, AI_DECISION_INTERVAL,
+                              SIM_LOD, SIM_LOD_FULL_RADIUS, SIM_LOD_MAX_INTERVAL,
+                              FOOD_RECHECK_DISTANCE)
+FOOD_RECHECK_DISTANCE_SQ = FOOD_RECHECK_DISTANCE * FOOD_RECHECK_DISTANCE
 
 SCREEN_WIDTH = 1080
 SCREEN_HEIGHT = 720
@@ -155,7 +158,8 @@ class Game:
 
         self.to_remove_particles = []
         self.running = True
-        self.next_fps_cull = 0.0  # sim_clock time the next performance cull is allowed
+        self.next_fps_cull = 0.0
+        self.frame = 0  # sim_clock time the next performance cull is allowed
 
         self.profiler = Profiler(window=60)
 
@@ -548,6 +552,10 @@ class Game:
         # unlink from every multicellular neighbour BEFORE the body leaves
         # the space, so no constraint is left pointing at a removed body
         remove_all_joints(cell)
+        if cell.last_grid_pos is not None:
+            grid_cell = self.world.get_lvl1_chunk_local_cell(cell.last_grid_pos)
+            if grid_cell is not None and cell in getattr(grid_cell, "entities", ()):
+                grid_cell.entities.remove(cell)
         self.cells.remove(cell)
         self.space.remove(cell.body, cell.shape)
 
@@ -576,6 +584,22 @@ class Game:
                     if len(grid_cell.particles) < grid_cell.particle_count:
                         if random.random() < 0.05 * dt:
                             grid_cell.spawn_particle()
+                            self.world.mark_food_changed((grid_cell.wx, grid_cell.wy))
+
+    def update_interval(self, cell, center):
+        """How many frames apart this cell's per-cell logic runs, from its
+        distance in lvl1 chunks (rings) to the player's chunk: every frame
+        inside SIM_LOD_FULL_RADIUS, then 2, 4, 8, ... up to
+        SIM_LOD_MAX_INTERVAL. The player and freshly spawned cells always
+        run every frame."""
+        if center is None or cell.is_player or cell.last_grid_pos is None:
+            return 1
+        gx, gy = cell.last_grid_pos
+        ring = max(abs(gx // LVL1_CHUNK_SIZE - center[0]),
+                   abs(gy // LVL1_CHUNK_SIZE - center[1]))
+        if ring <= SIM_LOD_FULL_RADIUS:
+            return 1
+        return min(1 << (ring - SIM_LOD_FULL_RADIUS), SIM_LOD_MAX_INTERVAL)
 
     def update(self):
         dt = 1 / 60
@@ -583,6 +607,7 @@ class Game:
         # simulated time, advanced by the same fixed dt as the physics step.
         # Cell.invulnerable_until is stamped against this clock.
         sim_clock.tick(dt)
+        self.frame += 1
 
         # too slow? thin the population by one random non-player cell
         self.cull_for_fps()
@@ -602,8 +627,19 @@ class Game:
         with self.profiler.section("sim_loop"):
             new_cells = []
             dead_cells = []
+            center = self.world.center_chunk if SIM_LOD else None
             for cell in self.cells:
-                self.world.update_entity(cell)
+                # distance-based update rate: far cells only run this loop
+                # every `steps` frames (staggered), and everything
+                # time-based below is scaled by `steps` so they keep pace
+                steps = self.update_interval(cell, center)
+                if steps > 1 and (self.frame + cell.update_phase) % steps:
+                    if cell.is_dead:            # killed by someone else
+                        dead_cells.append(cell)
+                    continue
+                cdt = dt * steps
+
+                self.world.update_entity(cell, cdt)
 
                 # EnvFeatures is only consumed by split() and photosynthesis, so
                 # build it lazily instead of once per cell per frame. (Phase 1 opt)
@@ -612,37 +648,64 @@ class Game:
                 will_split = (cell.mass >= cell.max_mass and cell.energy >= cell.max_energy
                               and not cell.is_splitting and not cell.is_dead)
                 env = None
-                if will_split or cell.has_chloroplast:
+                if will_split:
                     env = self.world.get_env_features(cell.body.position)
+                elif cell.has_chloroplast:
+                    if cell._env_grid_pos != cell.last_grid_pos:
+                        cell._env = self.world.get_env_features(cell.body.position)
+                        cell._env_grid_pos = cell.last_grid_pos
+                    env = cell._env
 
                 # player cell functions
                 if cell.is_player:
                     self.player.cell = cell
                     self.world.process(cell.body.position, self.space)
                     self.camera.update(cell.body, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT)
-                elif not cell.is_splitting:
+                elif not cell.is_splitting and not cell.has_cell_wall:
                     if cell.genome.intelligence >= 0:
-                        direction = cell.decision_model.decide(cell, self.world)
-                        cell.apply_movement(direction)
+                        # AI re-decides every AI_DECISION_INTERVAL frames,
+                        # staggered across cells; in between it keeps moving
+                        # along its last chosen direction
+                        if (cell.ai_direction is None or steps >= AI_DECISION_INTERVAL
+                                or (self.frame + cell.update_phase) % AI_DECISION_INTERVAL == 0):
+                            cell.ai_direction = cell.decision_model.decide(cell, self.world)
+                        cell.apply_movement(cell.ai_direction, steps)
 
                 # mitosis: a splitting daughter slides away from its sibling
                 # until the two no longer overlap (input / AI are paused for
                 # it until then -- see Cell.update_split)
                 if cell.is_splitting:
-                    cell.update_split(dt)
+                    cell.update_split(cdt)
 
                 # cell reproduction (children spawn into new_cells)
                 if will_split:
-                    cell.split(self.space, new_cells, env)
+                    cell.split(self.space, new_cells, env, self.world)
 
-                # gain energy: eat nearby particles
-                for particle in list(cell.nearby_particles):
-                    cell.consume_particle(particle, self.to_remove_particles)
+                # gain energy: eat nearby particles. Food nearby changed ->
+                # rebuild the list from the grid. Walled cells (plants, fungi)
+                # otherwise only re-check once they've drifted a little;
+                # moving cells check every update.
+                px, py = cell.body.position
+                check = True
+                if cell.food_changed:
+                    cell.refresh_nearby_particles(self.world)
+                    cell.food_changed = False
+                elif cell.has_cell_wall and cell.food_check_pos is not None:
+                    lx, ly = cell.food_check_pos
+                    check = (px - lx) * (px - lx) + (py - ly) * (py - ly) > FOOD_RECHECK_DISTANCE_SQ
+                if check:
+                    cell.food_check_pos = (px, py)
+                    if cell.nearby_particles:
+                        r2 = cell.size * cell.size
+                        hits = [p for p in cell.nearby_particles
+                                if not p.eaten and (p.x - px) * (p.x - px) + (p.y - py) * (p.y - py) <= r2]
+                        for particle in hits:
+                            cell.consume_particle(particle, self.to_remove_particles)
 
                 # gain energy: photosynthesis
                 if cell.has_chloroplast and env is not None and env.in_water:
                     rates = PHOTOSYNTHESIS_RATES.get(cell.color, {})
-                    cell.add_energy(rates.get(env.light_level, 0))
+                    cell.add_energy(rates.get(env.light_level, 0) * steps)
 
                 # death by starvation
                 if cell.energy <= 0:
@@ -655,14 +718,16 @@ class Game:
                         # it doesn't die the instant its protection ends
                         cell.contact_time[other] = 0.0
                         continue
-                    cell.contact_time[other] += dt
-                    cell.total_contact_time += dt
+                    cell.contact_time[other] += cdt
+                    cell.total_contact_time += cdt
                     if cell.contact_time[other] >= 0.5:
                         other.kill(cell)
 
                 # death by consumption
                 for entity in cell.nearby_entities:
-                    cell.consume_cell(entity)
+                    # only a strictly smaller, unwalled cell can be swallowed
+                    if entity.size < cell.size and not entity.has_cell_wall:
+                        cell.consume_cell(entity)
 
                 if cell.is_dead:
                     dead_cells.append(cell)
@@ -683,6 +748,7 @@ class Game:
 
                 if cell is not None and hasattr(cell, "particles") and particle in cell.particles:
                     cell.particles.remove(particle)
+                    self.world.mark_food_changed((gx, gy))
 
             self.to_remove_particles.clear()
 
