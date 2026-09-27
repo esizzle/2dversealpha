@@ -35,3 +35,13 @@ def sand_body(position, collision_type=0):
     shape.collision_type = collision_type
 
     return body, shape
+
+# one solid static square of side `size` centred on `position` -- used for the
+# world's boundary walls, which cover a whole chunk with a single shape
+def static_box(position, size, collision_type=0):
+    body = pymunk.Body(body_type=pymunk.Body.STATIC)
+    body.position = position
+    shape = pymunk.Poly.create_box(body, (size, size))
+    shape.collision_type = collision_type
+
+    return body, shape

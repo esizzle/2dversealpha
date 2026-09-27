@@ -9,22 +9,22 @@ from env_features import (
     MATERIAL_SAND, MATERIAL_BASALT,
 )
 #World 1:
-WORLD_KEY = [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2],
-             [1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2],
-             [1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2],
-             [1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2],
-             [1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2],
-             [1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2],
-             [1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2],
-             [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]]
+WORLD_KEY = [[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],
+             [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+             [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+             [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+             [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+             [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+             [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+             [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+             [3,1,1,1,1,1,1,1,1,1,1,1,1,1,2,3],
+             [3,1,1,1,1,1,1,1,1,2,2,2,2,2,2,3],
+             [3,1,1,1,1,1,2,2,2,2,2,2,2,2,2,3],
+             [3,1,1,1,1,2,2,2,2,2,2,2,2,2,2,3],
+             [3,1,1,1,2,2,2,2,2,2,2,2,2,2,2,3],
+             [3,1,1,1,2,2,2,2,2,2,2,2,2,2,2,3],
+             [3,1,1,2,2,2,2,2,2,2,2,2,2,2,2,3],
+             [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]]
 WORLD_PARTICLES = [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
                    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
                    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
@@ -178,6 +178,11 @@ CELL_SIZE = 40
 
 LVL1_GRID_MAX = WORLD_SIZE * LVL2_CHUNK_SIZE - 1  # 31
 
+# collision_type of the solid stand-in boxes for unloaded sand chunks
+# (see World.update_solid_sand). Cells only collide with them from outside --
+# main.py's on_solid_sand_begin lets a cell already inside swim out.
+SOLID_SAND_COLLISION_TYPE = 4
+
 # Physics constants, expressed per-second so they are frame-rate independent.
 # Old code added 98.1 px/frame at 60fps -> 98.1 * 60 = 5886 px/s^2.
 AIR_GRAVITY = 98.1 * 60          # px/s^2
@@ -189,6 +194,18 @@ class World:
         self.loaded_lvl1chunks = set()
         self.loaded_shapes = {}
         self.loaded_bodies = {}
+
+        # permanent world-boundary colliders (see load_permanent_walls);
+        # never touched by chunk loading / unloading
+        self.wall_bodies = []
+        self.wall_shapes = []
+
+        # solid stand-ins for sand that has no per-block hitboxes loaded:
+        #   ("lvl2", X, Y) -> (body, shape)  a whole unloaded lvl2 sand chunk
+        #   ("lvl1", x, y) -> (body, shape)  an unloaded quarter of a lvl2
+        #                                    sand chunk that is partly loaded
+        self.solid_sand = {}
+        self._solid_sand_for = None   # loaded-chunk set solid_sand was built for
 
         # (0,0) -> (15, 15)
         self.lvl2chunks = {}
@@ -215,6 +232,72 @@ class World:
                     cx = self.lvl2chunks[(x, y)].lvl1chunks[key].wx
                     cy = self.lvl2chunks[(x, y)].lvl1chunks[key].wy
                     self.lvl1chunks[(cx, cy)] = self.lvl2chunks[(x, y)].lvl1chunks[key]
+
+    # ------------------------------------------------------------------
+    # Permanent walls
+    # ------------------------------------------------------------------
+    def load_permanent_walls(self, space):
+        """Give every basalt level-2 chunk (the ring around the world in
+        WORLD_KEY) ONE solid static box covering the whole chunk, added once
+        and never unloaded, so nothing can leave the world no matter where
+        the player is. One box per chunk instead of one per grid cell keeps
+        the wall cheap (a basalt chunk is 32x32 grid cells)."""
+        if self.wall_bodies:
+            return  # already loaded
+        size = LVL2_CHUNK_SIZE * LVL1_CHUNK_SIZE * CELL_SIZE
+        for (x, y), lvl2 in self.lvl2chunks.items():
+            if lvl2.material != MATERIAL_BASALT:
+                continue
+            body, shape = static_box(((x + 0.5) * size, (y + 0.5) * size), size)
+            space.add(body, shape)
+            self.wall_bodies.append(body)
+            self.wall_shapes.append(shape)
+
+    # ------------------------------------------------------------------
+    # Solid sand (unloaded sand chunks)
+    # ------------------------------------------------------------------
+    def update_solid_sand(self, space):
+        """Make every sand region that has no per-block hitboxes loaded
+        impermeable, with as few static boxes as possible:
+          * a lvl2 sand chunk with NONE of its 4 lvl1 chunks loaded is one
+            solid 1280 px box;
+          * a lvl2 sand chunk that is partly loaded keeps the normal sand
+            blocks in its loaded lvl1 chunks, and each of its unloaded lvl1
+            chunks is one solid 640 px box -- so there is never a gap.
+        Sand chunks that hold food particles (has_particles) never get a
+        solid box: unloaded, they behave like open water, so cells can still
+        swim in and out to feed. Their sand blocks are real hitboxes again
+        as soon as the chunk loads near the player.
+        Only does work when the set of loaded lvl1 chunks has changed."""
+        loaded = frozenset(self.loaded_lvl1chunks)
+        if loaded == self._solid_sand_for:
+            return
+        self._solid_sand_for = loaded
+
+        wanted = {}
+        lvl2_px = LVL2_CHUNK_SIZE * LVL1_CHUNK_SIZE * CELL_SIZE
+        lvl1_px = LVL1_CHUNK_SIZE * CELL_SIZE
+        for (X, Y), lvl2 in self.lvl2chunks.items():
+            if lvl2.material != MATERIAL_SAND or lvl2.has_particles:
+                continue    # not sand, or food-bearing sand: stays open
+            quarters = [(X * LVL2_CHUNK_SIZE + i, Y * LVL2_CHUNK_SIZE + j)
+                        for i in range(LVL2_CHUNK_SIZE) for j in range(LVL2_CHUNK_SIZE)]
+            unloaded = [q for q in quarters if q not in loaded]
+            if len(unloaded) == len(quarters):
+                wanted[("lvl2", X, Y)] = (((X + 0.5) * lvl2_px, (Y + 0.5) * lvl2_px), lvl2_px)
+            else:
+                for (x, y) in unloaded:
+                    wanted[("lvl1", x, y)] = (((x + 0.5) * lvl1_px, (y + 0.5) * lvl1_px), lvl1_px)
+
+        # remove boxes no longer wanted, add new ones (unchanged ones stay)
+        for key in [k for k in self.solid_sand if k not in wanted]:
+            body, shape = self.solid_sand.pop(key)
+            space.remove(body, shape)
+        for key, (center, size) in wanted.items():
+            if key not in self.solid_sand:
+                body, shape = static_box(center, size, collision_type=SOLID_SAND_COLLISION_TYPE)
+                space.add(body, shape)
+                self.solid_sand[key] = (body, shape)
 
     # ------------------------------------------------------------------
     # Chunk loading / unloading
@@ -249,14 +332,8 @@ class World:
                 bodies.append(body)
                 shapes.append(shape)
 
-            if isinstance(self.lvl1chunks[chunk].materials[material], BasaltCell):
-                basalt_cell = self.lvl1chunks[chunk].materials[material]
-                bx = basalt_cell.wx * CELL_SIZE + CELL_SIZE / 2
-                by = basalt_cell.wy * CELL_SIZE + CELL_SIZE / 2
-                body, shape = sand_body((bx, by))
-                space.add(body, shape)
-                bodies.append(body)
-                shapes.append(shape)
+            # basalt needs no per-cell hitboxes: every basalt chunk is
+            # already one permanent solid box (load_permanent_walls)
         self.loaded_bodies[chunk] = bodies
         self.loaded_shapes[chunk] = shapes
 
@@ -365,6 +442,7 @@ class World:
         entity_tile_pos = self.world_to_lvl1_chunk(entity_pos)
         self.load_chunks(entity_tile_pos, space)
         self.unload_distant_chunks(entity_tile_pos, space)
+        self.update_solid_sand(space)
 
     def update_entity(self, entity, dt=1 / 60):
         entity_grid_pos = self.world_to_grid_cell(entity.body.position)

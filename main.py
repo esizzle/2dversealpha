@@ -9,6 +9,9 @@ from journal import Journal
 from settings import SettingsPanel, SettingsTab
 from audio import audio
 from sim_clock import sim_clock
+from multicell import remove_all_joints
+from plant_defense import check_vertex_defense
+from global_constants import SHOW_CELL_JOINTS
 
 SCREEN_WIDTH = 1080
 SCREEN_HEIGHT = 720
@@ -100,9 +103,14 @@ class Game:
         # Physics Space
         self.space = pymunk.Space()
 
+        # the basalt boundary walls are always loaded, independent of the
+        # player's position, so no cell can ever leave the world
+        self.world.load_permanent_walls(self.space)
+
         # handle collisions between carnivorous cells and cells with cell walls
         self.handler = self.space.add_collision_handler(1, 2)
         self.handler.begin = self.on_cell_begin
+        self.handler.pre_solve = self.on_cell_pre_solve
         self.handler.separate = self.on_cell_separate
 
         # walled <-> walled: only needed so two walled daughters can overlap
@@ -117,6 +125,9 @@ class Game:
         for cell_type in (1, 2):
             sand_handler = self.space.add_collision_handler(cell_type, 3)
             sand_handler.begin = self.on_sand_begin
+            # unloaded sand chunks are single solid boxes (world_grid)
+            solid_handler = self.space.add_collision_handler(cell_type, SOLID_SAND_COLLISION_TYPE)
+            solid_handler.begin = self.on_solid_sand_begin
 
         self.camera = Camera(type=0)
 
@@ -140,6 +151,7 @@ class Game:
         # initial chunk (and hitbox) load around the player
         pos = self.world.world_to_lvl1_chunk(self.player.cell.body.position)
         self.world.load_chunks(pos, self.space)
+        self.world.update_solid_sand(self.space)
 
         self.to_remove_particles = []
         self.running = True
@@ -246,6 +258,15 @@ class Game:
         predator_cell.contact_time[prey_cell] = 0.0
         return True
 
+    def on_cell_pre_solve(self, arbiter, space, data):
+        # runs every step while an unwalled cell touches a plant (a contact
+        # that begin rejected, like a splitting sibling pair, never gets
+        # here). Plant defence: a larger cell touching an exposed corner of
+        # the plant dies -- see plant_defense.py.
+        a, b = arbiter.shapes
+        check_vertex_defense(a._object, b._object, arbiter)
+        return True
+
     def on_cell_separate(self, arbiter, space, data):
         a, b = arbiter.shapes
         predator_cell = a._object
@@ -268,6 +289,15 @@ class Game:
         position = cell.body.position if cell is not None else cell_shape.body.position
         audio.play_collide_sand(position)
         return True
+
+    def on_solid_sand_begin(self, arbiter, space, data):
+        # a cell touching the solid box of an unloaded sand chunk. It is a
+        # wall from the outside; but a cell whose centre is already inside
+        # (it was swimming in that chunk's water when the chunk went solid)
+        # is ignored until it has left, instead of being blasted out.
+        cell_shape, solid_shape = arbiter.shapes
+        inside = solid_shape.point_query(cell_shape.body.position).distance < 0
+        return not inside
 
     # ------------------------------------------------------------------
     # Audio listener
@@ -427,11 +457,29 @@ class Game:
         for cell in self.cells:
             cell.draw(self.world_surface, self.camera.zoom, self.camera.offset)
 
+        if SHOW_CELL_JOINTS:
+            self.draw_joints()
+
         # WORLD BOX
         pygame.draw.rect(self.world_surface, BORDER, (0, 0, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT), 1)
 
         self.screen.blit(self.world_surface,
                          ((SCREEN_WIDTH - WORLD_WINDOW_WIDTH) / 2, (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) / 2))
+
+    def draw_joints(self):
+        """A thin centre-to-centre line per multicellular joint. Each joint
+        is stored on both of its cells, so it is drawn from one side only."""
+        zoom = self.camera.zoom
+        ox, oy = self.camera.offset
+        for cell in self.cells:
+            for neighbour in cell.joints:
+                if id(cell) > id(neighbour):
+                    continue
+                p1 = cell.body.position
+                p2 = neighbour.body.position
+                pygame.draw.line(self.world_surface, cell.color,
+                                 (p1.x * zoom + ox, p1.y * zoom + oy),
+                                 (p2.x * zoom + ox, p2.y * zoom + oy), 1)
 
     def draw_fps(self):
         # screen-space: top-left of the application window, outside the world
@@ -497,6 +545,9 @@ class Game:
 
         if not cell.has_split:
             cell.cell_death(self.world)
+        # unlink from every multicellular neighbour BEFORE the body leaves
+        # the space, so no constraint is left pointing at a removed body
+        remove_all_joints(cell)
         self.cells.remove(cell)
         self.space.remove(cell.body, cell.shape)
 
@@ -559,7 +610,7 @@ class Game:
                 # A cell that is still pulling apart from its sibling can't
                 # start another split.
                 will_split = (cell.mass >= cell.max_mass and cell.energy >= cell.max_energy
-                              and not cell.is_splitting)
+                              and not cell.is_splitting and not cell.is_dead)
                 env = None
                 if will_split or cell.has_chloroplast:
                     env = self.world.get_env_features(cell.body.position)
@@ -606,7 +657,7 @@ class Game:
                         continue
                     cell.contact_time[other] += dt
                     cell.total_contact_time += dt
-                    if cell.contact_time[other] >= 0.3:
+                    if cell.contact_time[other] >= 0.5:
                         other.kill(cell)
 
                 # death by consumption

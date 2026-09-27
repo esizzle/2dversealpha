@@ -12,6 +12,13 @@ LVL_2_INTEL_LIM = 9
 # mitosis; higher = snappier.
 SPLIT_SPEED = 20.0
 
+# Speed (px/s) every daughter leaves the split with, along its own split
+# direction. Walled (plant) cells can't propel themselves, so they keep
+# drifting at this speed until physics (collisions, terrain, joints) stops
+# them -- intentional. Moving cells leave at least this fast (AI cells at
+# their max_speed, the player with the parent's momentum).
+SPLIT_DRIFT_SPEED = SPLIT_SPEED
+
 # The split is finished when distance(d1, d2) >= r1 + r2 + this margin (px).
 # The small margin stops the pair touching again on the very next frame.
 SPLIT_SEPARATION_MARGIN = 1.0
@@ -42,3 +49,30 @@ SPLIT_MERGE_OUTLINES = True
 # Thickness (screen px) of every cell's outline. The mitosis mask is inset by
 # exactly this much, so it follows along if you thicken the border.
 CELL_OUTLINE_WIDTH = 1
+
+# ----------------------------------------------------------------------
+# Multicellularity -- see multicell.py
+# ----------------------------------------------------------------------
+# Joints run centre to centre with length = the two cells' sizes added
+# together, so linked cells sit edge against edge (see multicell.py).
+# Draw a thin centre-to-centre line for every joint.
+SHOW_CELL_JOINTS = True
+
+# ----------------------------------------------------------------------
+# Plant defence -- see plant_defense.py
+# ----------------------------------------------------------------------
+# A cell LARGER than a plant cell (attacker.size > plant.size) dies if it
+# touches one of the plant square's exposed corners.
+PLANT_VERTEX_DEFENSE = True
+
+# How close (px, world units) a contact must be to a corner to count as a
+# corner hit. Plant squares are 2 * size wide (size 5-40, default 10 -> a
+# 20 px square), so 3 px is roughly the outer 15% of a default edge.
+# Raise it to make corners more dangerous, lower it to make them precise.
+PLANT_VERTEX_HIT_RADIUS = 3.0
+
+# A corner counts as covered (not exposed) if it lies inside, or within this
+# many px of, a directly joined neighbouring plant cell. Joined cells sit
+# edge to edge, so their shared corners are ~0 px from each other; the
+# tolerance absorbs the small gaps a flexing joint opens up.
+PLANT_VERTEX_COVER_TOLERANCE = 2.0

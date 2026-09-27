@@ -10,10 +10,12 @@ from env_features import EnvFeatures
 from physics_object import *
 from world_grid import WaterCell, Particle
 from decision_models import create_decision_model
+from multicell import begin_multicellular_split, finish_multicellular_split, remove_all_joints
 from audio import audio
 from sim_clock import sim_clock
 from global_constants import (
     SPLIT_SPEED,
+    SPLIT_DRIFT_SPEED,
     SPLIT_SEPARATION_MARGIN,
     SPLIT_MIN_PARENT_SPEED,
     SPLIT_STALL_TIME,
@@ -30,10 +32,6 @@ from global_constants import (
 CELL_STATE_NORMAL = "normal"
 CELL_STATE_SPLITTING = "splitting"
 
-# Walled (plant) daughters can't propel themselves, so instead of keeping
-# their split momentum forever they ease down to this speed as the gap opens
-# and then come to rest. Non-zero so two plants always finish separating.
-_SPLIT_SETTLE_SPEED = SPLIT_SPEED * 0.25
 # The gap must grow by at least this much (px) per frame to count as progress.
 _SPLIT_PROGRESS_EPSILON = 0.01
 
@@ -75,7 +73,10 @@ class Genome:
         self.cell_attraction = 0.0  # 3A: single toward/away, [-1, 1]
         self.smaller_cell_attraction = 0.0  # 3B: response to smaller cells
         self.larger_cell_attraction = 0.0  # 3B: response to larger cells
-        self.wall_cell_attraction = 10.0
+        self.wall_cell_attraction = 0.0
+
+        #multicularity
+        self.multicellular = False
 
     def mutate_gene(self, env: EnvFeatures, cell):
         """Mutate this genome based on the environment (env) and the parent
@@ -91,12 +92,13 @@ class Genome:
                 self.size = self.max_mass//2
 
         if env.chunk_material == 2:
-            if random.random() < self.mutation_rate:
-                # self.size -= random.choice([1, 2, 3, 4])
-                # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
-                self.max_mass -= random.choice([2, 4, 6, 8])
-                self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
-                self.size = self.max_mass//2
+            if not self.has_chloroplast:
+                if random.random() < self.mutation_rate:
+                    # self.size -= random.choice([1, 2, 3, 4])
+                    # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
+                    self.max_mass -= random.choice([2, 4, 6, 8])
+                    self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
+                    self.size = self.max_mass//2
 
         # TODO: Add less particles to less nutrient dense areas, so cells can still eat and mutate within them
         #  For now lets just leave mass and size coupled
@@ -187,6 +189,26 @@ class Genome:
             if random.random() < self.mutation_rate:
                 self.intelligence = max(4, self.intelligence)
 
+        if self.intelligence == 4:
+            choice = random.uniform(0.1, 0.2)
+            if cell.amt_type2_particles > 0:
+                for i in range(cell.amt_type2_particles):
+                    if random.random() < self.mutation_rate:
+                        self.wall_cell_attraction = min(self.wall_cell_attraction + choice, 1)
+
+            else:
+                if random.random()< self.mutation_rate:
+                    self.wall_cell_attraction = max(-1, self.wall_cell_attraction - choice)
+
+
+        # multicellularity
+        if len(cell.nearby_entities) > 4:
+            for i in range(len(cell.nearby_entities)):
+                if random.random() < self.mutation_rate:
+                    self.multicellular = True
+
+
+
 
         # if not env.has_particles:
         #     if random.random() < self.mutation_rate:
@@ -253,12 +275,17 @@ class Cell:
         # mutation booleans
         self.has_cell_wall = genome.has_cell_wall
         self.has_chloroplast = genome.has_chloroplast
+        self.multicellular = genome.multicellular
 
         # physics
         self.body, self.shape = init_cell_physics(
             self.mass, self.size, position, self.has_cell_wall
         )
         self.shape._object = self
+
+        # multicellular links: {neighbour Cell: pymunk.PinJoint}. The same
+        # joint object is stored on both cells (see multicell.py).
+        self.joints = {}
 
         # object tracking
         self.id = uuid.uuid4()
@@ -274,6 +301,7 @@ class Cell:
         self.split_elapsed = 0.0
         self.split_best_distance = 0.0        # widest gap so far (stall detection)
         self.split_stall_time = 0.0
+        self.split_joins = False              # multicellular: join the pair when done
 
         # sim_clock time until which other organisms can't hurt this cell
         self.invulnerable_until = 0.0
@@ -480,15 +508,24 @@ class Cell:
         space.add(new_cell1.body, new_cell1.shape)
         space.add(new_cell2.body, new_cell2.shape)
 
-        # daughter 1 leaves along the parent's heading and picks the parent's
-        # forward momentum back up; daughter 2 leaves the opposite way
-        new_cell1.begin_split(new_cell2, direction, parent_speed, True)
-        new_cell2.begin_split(new_cell1, (-direction[0], -direction[1]), parent_speed, False)
+        if self.multicellular and self.has_chloroplast:
+            # multicellular division: same mitosis animation, but daughter 1
+            # stays in the parent's place (and takes over its links) while
+            # daughter 2 slides out along the velocity axis; the two are
+            # joined when their edges meet (see multicell.py / update_split)
+            begin_multicellular_split(self, new_cell1, new_cell2, SPLIT_MIN_PARENT_SPEED)
+        else:
+            # daughter 1 leaves along the parent's heading and picks the parent's
+            # forward momentum back up; daughter 2 leaves the opposite way
+            new_cell1.begin_split(new_cell2, direction, parent_speed, True)
+            new_cell2.begin_split(new_cell1, (-direction[0], -direction[1]), parent_speed, False)
 
         # add new cells to game cell list
         cell_list.extend([new_cell1, new_cell2])
 
-        # prepare current cell for deletion
+        # prepare current cell for deletion (any links it still has were
+        # handed to daughter 1 above; this just guarantees none are left)
+        remove_all_joints(self)
         self.is_player = False
         self.has_split = True
         self.is_dead = True
@@ -568,8 +605,13 @@ class Cell:
             and other.split_sibling is self
         )
 
-    def begin_split(self, sibling, direction, parent_speed, inherits_momentum):
+    def begin_split(self, sibling, direction, parent_speed, inherits_momentum, joins=False):
+        """Enter the splitting state. A zero `direction` means this daughter
+        is not pushed at all (the multicellular daughter that stays in the
+        parent's place). `joins` = link the pair with a joint when they finish
+        separating, and finish when their edges meet."""
         self.state = CELL_STATE_SPLITTING
+        self.split_joins = joins
         self.split_sibling = sibling
         self.split_is_lead = inherits_momentum
         self.split_direction = direction
@@ -577,18 +619,19 @@ class Cell:
         self.split_elapsed = 0.0
         self.split_best_distance = 0.0
         self.split_stall_time = 0.0
-        self.body.velocity = (direction[0] * SPLIT_SPEED, direction[1] * SPLIT_SPEED)
+        if direction[0] or direction[1]:
+            self.body.velocity = (direction[0] * SPLIT_SPEED, direction[1] * SPLIT_SPEED)
 
     def _split_exit_speed(self, parent_speed, inherits_momentum):
         """Speed this daughter eases toward as the gap opens, chosen so the
         hand-back to normal behaviour has no jump in speed or direction."""
         if self.has_cell_wall:
-            return _SPLIT_SETTLE_SPEED    # plants can't swim: settle, then rest
+            return SPLIT_DRIFT_SPEED      # plants can't swim: they drift off
         if not self.is_player and self.genome.intelligence >= 0:
-            return self.max_speed         # AI cells cruise at max_speed anyway
+            return max(self.max_speed, SPLIT_DRIFT_SPEED)   # AI cruises at max_speed
         if inherits_momentum:
-            return max(parent_speed, SPLIT_SPEED)   # parent's forward momentum
-        return SPLIT_SPEED                # keeps its separation momentum
+            return max(parent_speed, SPLIT_DRIFT_SPEED)     # parent's forward momentum
+        return SPLIT_DRIFT_SPEED          # keeps its separation momentum
 
     def update_split(self, dt):
         """Advance the separation by one frame. No-op unless splitting."""
@@ -605,10 +648,16 @@ class Cell:
         dx = self.body.position.x - sibling.body.position.x
         dy = self.body.position.y - sibling.body.position.y
         distance = math.hypot(dx, dy)
-        target = self.split_radius + sibling.split_radius + SPLIT_SEPARATION_MARGIN
+        if self.split_joins:
+            # multicellular: done when the facing edges meet (no gap)
+            target = self.size + sibling.size
+        else:
+            target = self.split_radius + sibling.split_radius + SPLIT_SEPARATION_MARGIN
 
         # geometric completion: the daughters no longer overlap
         if distance >= target:
+            if self.split_joins:
+                self._join_split_pair(sibling)
             sibling.end_split()
             self.end_split()
             return
@@ -624,8 +673,10 @@ class Cell:
         if self.split_elapsed >= SPLIT_MAX_DURATION:
             self._force_end_split(sibling)
             return
-        if self.split_stall_time >= SPLIT_STALL_TIME:
+        if self.split_stall_time >= SPLIT_STALL_TIME and not self.split_joins:
             # blocked along this axis: turn the split axis 90 degrees
+            # (not for multicellular pairs: they must stay edge-aligned, so
+            # they wait for SPLIT_MAX_DURATION instead)
             ax, ay = self.split_direction
             self._retarget_split((-ay, ax))
             sibling._retarget_split((ay, -ax))
@@ -635,9 +686,18 @@ class Cell:
         # the state ends. The lateral component is left to the physics world
         # (gravity, bumps from other organisms), so only the separation itself
         # is scripted.
+        ax, ay = self.split_direction
+        if ax == 0 and ay == 0:
+            return      # the daughter that stays put: physics owns it
         progress = min(distance / target, 1.0)
         speed = SPLIT_SPEED + (self.split_exit_speed - SPLIT_SPEED) * progress * progress
-        ax, ay = self.split_direction
+        if self.split_joins:
+            # multicellular: slide out RELATIVE to the daughter that stays
+            # put, which keeps the parent's velocity -- otherwise a moving
+            # parent's stay-put daughter could overtake this one
+            base = sibling.body.velocity
+            self.body.velocity = (base.x + ax * speed, base.y + ay * speed)
+            return
         velocity = self.body.velocity
         lateral = velocity.y * ax - velocity.x * ay
         self.body.velocity = (ax * speed - ay * lateral, ay * speed + ax * lateral)
@@ -657,7 +717,7 @@ class Cell:
         self.split_sibling = None
         self.invulnerable_until = sim_clock.now + POST_SPLIT_INVULNERABILITY
 
-        if not self.is_player:
+        if not self.is_player and (self.split_direction[0] or self.split_direction[1]):
             # let the wander heading continue the way the split was already
             # carrying this cell, instead of wheeling round on the first frame
             self.decision_model.seed_heading(self.split_direction)
@@ -669,12 +729,27 @@ class Cell:
         wedged pair never would. Re-adding the shape drops that cached
         contact, so begin fires again next step, the pair is no longer
         splitting, and normal collision resolution pushes them apart."""
+        if self.split_joins:
+            self._join_split_pair(sibling)
         sibling.end_split()
         self.end_split()
+        self._reset_contacts()
+
+    def _reset_contacts(self):
+        """Remove and re-add this cell's shape so pymunk forgets a sibling
+        contact it was told to ignore; the pair then collides normally."""
         space = self.shape.space
         if space is not None:
             space.remove(self.shape)
             space.add(self.shape)
+
+    def _join_split_pair(self, sibling):
+        """Multicellular split finished: link the two daughters edge to
+        edge. The sibling contact was ignored during the split and pymunk
+        keeps ignoring it while the shapes touch -- which edge-to-edge cells
+        always do -- so reset it, or linked cells would never collide."""
+        finish_multicellular_split(self, sibling)
+        self._reset_contacts()
 
     # ------------------------------------------------------------------
     # Rendering
