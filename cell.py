@@ -5,7 +5,7 @@ import pygame
 import math
 import random
 
-from colors import  BLACK, LIME, ORANGE, RED
+from colors import BLACK, LIME, ORANGE, RED, FUNGI
 from env_features import EnvFeatures
 from physics_object import *
 from world_grid import WaterCell, Particle
@@ -54,6 +54,7 @@ class Genome:
         # boolean mutations
         self.has_cell_wall = False
         self.has_chloroplast = False
+        self.is_fungi = False
 
         # hard coded bounds
         # max_mass 10 -> 80
@@ -93,13 +94,17 @@ class Genome:
                 self.size = self.max_mass//2
 
         if env.chunk_material == 2:
-            if not self.has_chloroplast:
+            if not self.has_cell_wall:
                 if random.random() < self.mutation_rate:
                     # self.size -= random.choice([1, 2, 3, 4])
                     # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
                     self.max_mass -= random.choice([2, 4, 6, 8])
                     self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
                     self.size = self.max_mass//2
+            if self.has_cell_wall and not self.has_chloroplast:
+                if random.random() < 2*self.mutation_rate:
+                    self.is_fungi = True
+                    self.color = FUNGI
 
         # TODO: Add less particles to less nutrient dense areas, so cells can still eat and mutate within them
         #  For now lets just leave mass and size coupled
@@ -120,6 +125,10 @@ class Genome:
             if random.random() < self.mutation_rate:
                 self.max_speed = min(self.max_speed + 5, self.speed_range[1])
 
+        for _ in range(cell.amt_type2_particles):
+            if random.random() < self.mutation_rate:
+                self.max_speed = max(self.max_speed - 5, self.speed_range[0])
+
         self.acceleration = self.max_speed
 
         # mutate cell wall: only cells that never moved can evolve one
@@ -129,7 +138,7 @@ class Genome:
 
         # mutate chloroplast: needs a wall, water, and bright light
         # (light_level >= 4 replaces the old hardcoded c2y == 8 check)
-        if self.has_cell_wall and not self.has_chloroplast:
+        if self.has_cell_wall and not (self.has_chloroplast or self.is_fungi):
             if env.in_water and env.light_level >= 4:
                 if random.random() < self.mutation_rate:
                     self.has_chloroplast = True
@@ -153,53 +162,54 @@ class Genome:
         # mutate intelligence: perception is costly, so it only pays off -- and
         # only evolves -- where food is scarce. Rich water keeps cells at Level 0.
         # level 0 intelligence: if in water and high nutrients --> level 0 intelligence (random movement)
-        if env.chunk_material == 1 and env.has_particles:
-            # decrease chance of first form of intelligence evolving
-            if random.random() < self.mutation_rate/2:
-                self.intelligence = max(0, self.intelligence)
-        if env.chunk_material == 2 and env.has_particles:
-            if random.random() < self.mutation_rate:
-                self.intelligence = max(1, self.intelligence)
-
-        if self.intelligence >= 1:
-            if random.random() < self.mutation_rate:
-                self.terrain_avoidance += random.uniform(-0.5,0.5)
-
-        # level 2 intelligence: nutrient awareness
-        if not env.has_particles:
-            if random.random() < self.mutation_rate:
-                self.intelligence = max(2, self.intelligence)
-
-        # level 3 intelligence: cell awareness
-        if cell.amt_type1_particles > 0:
-            if random.random() < self.mutation_rate:
-                self.intelligence = max(3, self.intelligence)
-
-        if self.intelligence == 3:
-            choice = random.uniform(0.1, 0.2)
-            if cell.amt_type1_particles > 0:
-                for i in range(cell.amt_type1_particles):
-                    if random.random() < self.mutation_rate:
-                        self.cell_attraction = min(self.cell_attraction + choice, 1)
-            else:
+        if not self.has_cell_wall:
+            if env.chunk_material == 1 and env.has_particles:
+                # decrease chance of first form of intelligence evolving
+                if random.random() < self.mutation_rate/2:
+                    self.intelligence = max(0, self.intelligence)
+            if env.chunk_material == 2 and env.has_particles:
                 if random.random() < self.mutation_rate:
-                    self.cell_attraction = max(-1, self.cell_attraction - choice)
+                    self.intelligence = max(1, self.intelligence)
 
-        # level 4 intelligence: type awareness
-        if cell.amt_type2_particles > 0:
-            if random.random() < self.mutation_rate:
-                self.intelligence = max(4, self.intelligence)
+            if self.intelligence >= 1:
+                if random.random() < self.mutation_rate:
+                    self.terrain_avoidance += random.uniform(-0.5,0.5)
 
-        if self.intelligence == 4:
-            choice = random.uniform(0.1, 0.2)
-            if cell.amt_type2_particles > 0:
-                for i in range(cell.amt_type2_particles):
+            # level 2 intelligence: nutrient awareness
+            if not env.has_particles:
+                if random.random() < self.mutation_rate:
+                    self.intelligence = max(2, self.intelligence)
+
+            # level 3 intelligence: cell awareness
+            if cell.amt_type1_particles > 0:
+                if random.random() < self.mutation_rate:
+                    self.intelligence = max(3, self.intelligence)
+
+            if self.intelligence == 3:
+                choice = random.uniform(0.1, 0.2)
+                if cell.amt_type1_particles > 0:
+                    for i in range(cell.amt_type1_particles):
+                        if random.random() < self.mutation_rate:
+                            self.cell_attraction = min(self.cell_attraction + choice, 1)
+                else:
                     if random.random() < self.mutation_rate:
-                        self.wall_cell_attraction = min(self.wall_cell_attraction + choice, 1)
+                        self.cell_attraction = max(-1, self.cell_attraction - choice)
 
-            else:
-                if random.random()< self.mutation_rate:
-                    self.wall_cell_attraction = max(-1, self.wall_cell_attraction - choice)
+            # level 4 intelligence: type awareness
+            if cell.amt_type2_particles > 0:
+                if random.random() < self.mutation_rate:
+                    self.intelligence = max(4, self.intelligence)
+
+            if self.intelligence == 4:
+                choice = random.uniform(0.1, 0.2)
+                if cell.amt_type2_particles > 0:
+                    for i in range(cell.amt_type2_particles):
+                        if random.random() < self.mutation_rate:
+                            self.wall_cell_attraction = min(self.wall_cell_attraction + choice, 1)
+
+                else:
+                    if random.random()< self.mutation_rate:
+                        self.wall_cell_attraction = max(-1, self.wall_cell_attraction - choice)
 
 
         # multicellularity
@@ -279,6 +289,7 @@ class Cell:
         # mutation booleans
         self.has_cell_wall = genome.has_cell_wall
         self.has_chloroplast = genome.has_chloroplast
+        self.is_fungi = genome.is_fungi
         self.multicellular = genome.multicellular
 
         # physics
@@ -562,13 +573,17 @@ class Cell:
 
     def cell_death(self, world):
         # from cell mass get amount of large (5x) particles and small particles
-        if self.has_chloroplast:
-            num_large_particles = int(self.mass // 3)
-            num_small_particles = int(self.mass % 3)
+        if self.has_cell_wall and (self.is_fungi or self.has_chloroplast):
+            num_large_particles = int(self.mass // 6)
+            num_small_particles = int(self.mass % 6)
             total = num_small_particles + num_large_particles
             if total == 0:
                 return
-            choices = [0] * num_small_particles + [2] * num_large_particles
+            if self.has_chloroplast:
+                choices = [0] * num_small_particles + [2] * num_large_particles
+            elif self.is_fungi:
+                choices = [0] * num_small_particles + [3] * num_large_particles
+
         else:
             num_large_particles = int(self.mass // 5)
             num_small_particles = int(self.mass % 5)

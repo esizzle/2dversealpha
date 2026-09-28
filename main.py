@@ -13,7 +13,7 @@ from multicell import remove_all_joints
 from plant_defense import check_vertex_defense
 from global_constants import (SHOW_CELL_JOINTS, AI_DECISION_INTERVAL,
                               SIM_LOD, SIM_LOD_FULL_RADIUS, SIM_LOD_MAX_INTERVAL,
-                              FOOD_RECHECK_DISTANCE)
+                              FOOD_RECHECK_DISTANCE, PARTICLE_RESPAWN_RATE)
 FOOD_RECHECK_DISTANCE_SQ = FOOD_RECHECK_DISTANCE * FOOD_RECHECK_DISTANCE
 
 SCREEN_WIDTH = 1080
@@ -575,16 +575,32 @@ class Game:
             self.next_fps_cull = sim_clock.now + FPS_CULL_COOLDOWN
 
     def respawn_particles(self, dt):
-        for chunk in self.world.loaded_lvl1chunks:
-            lvl1chunk = self.world.lvl1chunks[chunk]
-            if not lvl1chunk.has_particles:
+        """Regrow food in every food chunk of the world, on the same
+        distance rings as the cells: chunks near the player every frame,
+        further rings every 2nd, 4th, ... frame with dt scaled to match.
+        (With SIM_LOD off, only the loaded chunks regrow, every frame.)"""
+        center = self.world.center_chunk if SIM_LOD else None
+        if center is None:
+            chunks = [self.world.lvl1chunks[k] for k in self.world.loaded_lvl1chunks]
+        else:
+            chunks = self.world.food_chunks()
+        for lvl1chunk in chunks:
+            if not lvl1chunk.has_particles or not lvl1chunk.water_cells:
                 continue
-            for grid_cell in lvl1chunk.materials.values():
-                if isinstance(grid_cell, WaterCell):
-                    if len(grid_cell.particles) < grid_cell.particle_count:
-                        if random.random() < 0.05 * dt:
-                            grid_cell.spawn_particle()
-                            self.world.mark_food_changed((grid_cell.wx, grid_cell.wy))
+            steps = 1 if center is None else self.chunk_interval(lvl1chunk.wx, lvl1chunk.wy, center)
+            if steps > 1 and (self.frame + lvl1chunk.update_phase) % steps:
+                continue
+            for grid_cell in lvl1chunk.respawn_particles(dt * steps, PARTICLE_RESPAWN_RATE):
+                self.world.mark_food_changed((grid_cell.wx, grid_cell.wy))
+
+    def chunk_interval(self, cx, cy, center):
+        """Frames between updates for something in lvl1 chunk (cx, cy):
+        every frame within SIM_LOD_FULL_RADIUS rings of the player's chunk,
+        then 2, 4, 8, ... up to SIM_LOD_MAX_INTERVAL."""
+        ring = max(abs(int(cx) - center[0]), abs(int(cy) - center[1]))
+        if ring <= SIM_LOD_FULL_RADIUS:
+            return 1
+        return min(1 << (ring - SIM_LOD_FULL_RADIUS), SIM_LOD_MAX_INTERVAL)
 
     def update_interval(self, cell, center):
         """How many frames apart this cell's per-cell logic runs, from its
@@ -595,11 +611,7 @@ class Game:
         if center is None or cell.is_player or cell.last_grid_pos is None:
             return 1
         gx, gy = cell.last_grid_pos
-        ring = max(abs(gx // LVL1_CHUNK_SIZE - center[0]),
-                   abs(gy // LVL1_CHUNK_SIZE - center[1]))
-        if ring <= SIM_LOD_FULL_RADIUS:
-            return 1
-        return min(1 << (ring - SIM_LOD_FULL_RADIUS), SIM_LOD_MAX_INTERVAL)
+        return self.chunk_interval(gx // LVL1_CHUNK_SIZE, gy // LVL1_CHUNK_SIZE, center)
 
     def update(self):
         dt = 1 / 60
@@ -650,7 +662,9 @@ class Game:
                 env = None
                 if will_split:
                     env = self.world.get_env_features(cell.body.position)
-                elif cell.has_chloroplast:
+                elif cell.has_chloroplast or cell.is_fungi:
+                    # plants (photosynthesis) and fungi (decomposition) read
+                    # their environment; cached until they change grid cell
                     if cell._env_grid_pos != cell.last_grid_pos:
                         cell._env = self.world.get_env_features(cell.body.position)
                         cell._env_grid_pos = cell.last_grid_pos
@@ -706,6 +720,11 @@ class Game:
                 if cell.has_chloroplast and env is not None and env.in_water:
                     rates = PHOTOSYNTHESIS_RATES.get(cell.color, {})
                     cell.add_energy(rates.get(env.light_level, 0) * steps)
+
+                # gain energy: decomposition
+                if cell.is_fungi and env is not None and env.chunk_material == MATERIAL_SAND and env.has_particles:
+                    if cell.mass < cell.max_mass:
+                        cell.mass += 1 * steps
 
                 # death by starvation
                 if cell.energy <= 0:

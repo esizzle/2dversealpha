@@ -122,3 +122,10 @@ SIM_LOD_MAX_INTERVAL = 16
 # appears or disappears next to them, or once they have drifted at least
 # this many px since their last check. Moving cells check every update.
 FOOD_RECHECK_DISTANCE = 2.0
+
+# Food respawn: chance per second that a food-bearing water grid cell with
+# room left grows a new particle. Uses the same distance rings as SIM_LOD:
+# chunks near the player respawn every frame, further rings every 2nd, 4th,
+# ... frame with the chance scaled up to match, so every food region in the
+# world refills at the same average rate.
+PARTICLE_RESPAWN_RATE = 0.05

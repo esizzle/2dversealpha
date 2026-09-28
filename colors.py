@@ -12,7 +12,7 @@ ORANGE_RED = (250, 106, 10)
 ORANGE = (249, 163, 27)
 GOLD = (255, 213, 65)
 
-YELLOW = (255, 252, 64)
+FUNGI_PARTICLE = (255, 252, 64)
 YELLOW_GREEN = (214, 242, 100)
 LIME = (156, 219, 67)
 
@@ -35,6 +35,8 @@ AIR = (185, 191, 251)
 BASALT = (50, 43, 40)
 
 BORDER = (74, 84, 98)
+
+FUNGI = (228, 210, 170)
 
 
 # palette.py

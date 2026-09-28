@@ -193,6 +193,7 @@ class World:
     def __init__(self):
         self.loaded_lvl1chunks = set()
         self.center_chunk = None      # lvl1 chunk the player is in (set by process)
+        self._food_chunks = None      # see food_chunks()
         self.loaded_shapes = {}
         self.loaded_bodies = {}
 
@@ -224,6 +225,14 @@ class World:
                 self.lvl2chunks[(x, y)].light_level = WORLD_SHADER[y][x]
                 if WORLD_PARTICLES[y][x] == 1:
                     self.lvl2chunks[(x, y)].has_particles = True
+
+    def food_chunks(self):
+        """Level-1 chunks that grow food (has_particles and at least one
+        water cell). Built once, on first use."""
+        if self._food_chunks is None:
+            self._food_chunks = [c for c in self.lvl1chunks.values()
+                                 if c.has_particles and c.water_cells]
+        return self._food_chunks
 
     def load_lvl2chunks(self):
         for x in range(WORLD_SIZE):
@@ -674,6 +683,29 @@ class Level1Chunk:
         if self.material == MATERIAL_SAND:
             self.generate_sand_cell()
 
+        # for food respawning (see respawn_particles)
+        self.water_cells = [c for c in self.materials.values() if isinstance(c, WaterCell)]
+        self.update_phase = random.randrange(1 << 16)   # staggers ring updates
+
+    def respawn_particles(self, dt, rate):
+        """Give each water cell here with room left a `rate * dt` chance of
+        growing a particle -- without looping over all of them: draw how
+        many cells get a roll this update (expected count, randomly rounded)
+        and pick them at random. Same odds per cell, a few operations
+        instead of one per grid cell. Returns the cells that grew food."""
+        cells = self.water_cells
+        expected = rate * dt * len(cells)
+        n = int(expected)
+        if random.random() < expected - n:
+            n += 1
+        grown = []
+        for _ in range(n):
+            cell = random.choice(cells)
+            if len(cell.particles) < cell.particle_count:
+                cell.spawn_particle()
+                grown.append(cell)
+        return grown
+
     def generate_sand_cell(self):
         REGION_SIZE = 4
         BLOCK_SIZE = 2
@@ -836,9 +868,14 @@ class Particle:
             self.color = MAGENTA
 
         elif type == 2:
-            self.multiplier = 3
-            self.radius = 4
+            self.multiplier = 6
+            self.radius = 6
             self.color = GREEN
+
+        elif type == 3:
+            self.multiplier = 6
+            self.radius = 6
+            self.color = FUNGI_PARTICLE
 
         else:
             self.multiplier = 0
