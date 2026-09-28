@@ -391,14 +391,26 @@ class Game:
         self.stat_box_surface.blit(stat_bar, (10, height))
         self.stat_box_surface.blit(stat_fraction, (100, height + 15))
 
+    def draw_stat_text(self, stat_name, value, height):
+        """A plain text stat row: label on the left, value right-aligned to
+        the right edge of the stat bars (x = STAT_BOX_W - 10, see
+        draw_stat_bar), so its last digit lines up with the bars below."""
+        label = self.font.render(stat_name + ":", True, (255, 255, 255))
+        value_text = self.font.render(str(value), True, (255, 0, 0))
+        self.stat_box_surface.blit(label, (10, height))
+        self.stat_box_surface.blit(value_text, value_text.get_rect(topright=(STAT_BOX_W - 10, height)))
+
     def draw_stat_box(self):
         self.stat_box_surface.fill(BLACK)
 
+        # Generation
+        self.draw_stat_text("GENERATION", self.player.cell.generation, 20)
+
         # Mass
-        self.draw_stat_bar(self.player.cell.mass, self.player.cell.max_mass, "MASS", "pg", 25)
+        self.draw_stat_bar(self.player.cell.mass, self.player.cell.max_mass, "MASS", "pg", 52)
 
         # Energy
-        self.draw_stat_bar(self.player.cell.energy, self.player.cell.max_energy, "ENERGY", "nJ", 62, 1000)
+        self.draw_stat_bar(self.player.cell.energy, self.player.cell.max_energy, "ENERGY", "nJ", 89, 1000)
 
         # OUTLINE
         pygame.draw.rect(self.stat_box_surface, BORDER, (0, 0, STAT_BOX_W, STAT_BOX_H), 1)

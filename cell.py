@@ -86,7 +86,7 @@ class Genome:
 
         # mutate size: size increases in less material dense areas, and decreases in more material dense areas
         if env.chunk_material == 1:
-            if random.random() < self.mutation_rate:
+            if random.random() < self.mutation_rate or (cell.is_player and cell.generation % 4 == 0):
                 # self.size += random.choice([1, 2, 3, 4])
                 # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
                 self.max_mass += random.choice([2, 4, 6, 8])
@@ -95,7 +95,7 @@ class Genome:
 
         if env.chunk_material == 2:
             if not self.has_cell_wall:
-                if random.random() < self.mutation_rate:
+                if random.random() < self.mutation_rate or (cell.is_player and cell.generation % 4 == 0):
                     # self.size -= random.choice([1, 2, 3, 4])
                     # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
                     self.max_mass -= random.choice([2, 4, 6, 8])
@@ -251,6 +251,7 @@ class Cell:
         self.acceleration = genome.acceleration
         self.max_speed = genome.max_speed
         self.efficiency_factor = genome.efficiency_factor
+        self.generation = 1
 
         # visual traits
         self.color = genome.color
@@ -559,6 +560,9 @@ class Cell:
             new_cell1.begin_split(new_cell2, direction, parent_speed, True)
             new_cell2.begin_split(new_cell1, (-direction[0], -direction[1]), parent_speed, False)
 
+        # track new cell generation
+        new_cell1.generation = self.generation + 1
+        new_cell2.generation = self.generation + 1
         # add new cells to game cell list
         cell_list.extend([new_cell1, new_cell2])
 
