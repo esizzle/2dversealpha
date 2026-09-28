@@ -86,7 +86,7 @@ class Genome:
 
         # mutate size: size increases in less material dense areas, and decreases in more material dense areas
         if env.chunk_material == 1:
-            if random.random() < self.mutation_rate or (cell.is_player and cell.generation % 4 == 0):
+            if (random.random() < self.mutation_rate and not cell.is_player) or (cell.is_player and cell.generation % 4 == 0):
                 # self.size += random.choice([1, 2, 3, 4])
                 # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
                 self.max_mass += random.choice([2, 4, 6, 8])
@@ -95,7 +95,7 @@ class Genome:
 
         if env.chunk_material == 2:
             if not self.has_cell_wall:
-                if random.random() < self.mutation_rate or (cell.is_player and cell.generation % 4 == 0):
+                if (random.random() < self.mutation_rate and not cell.is_player) or (cell.is_player and cell.generation % 4 == 0):
                     # self.size -= random.choice([1, 2, 3, 4])
                     # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
                     self.max_mass -= random.choice([2, 4, 6, 8])
