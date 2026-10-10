@@ -9,7 +9,7 @@ from journal import Journal
 from settings import SettingsPanel, SettingsTab
 from audio import audio
 from sim_clock import sim_clock
-from multicell import remove_all_joints
+from multicell import remove_all_joints, same_organism, steering_head, members_collide
 from plant_defense import check_vertex_defense
 from global_constants import (SHOW_CELL_JOINTS, AI_DECISION_INTERVAL,
                               SIM_LOD, SIM_LOD_FULL_RADIUS, SIM_LOD_MAX_INTERVAL,
@@ -117,11 +117,15 @@ class Game:
         self.handler.separate = self.on_cell_separate
 
         # walled <-> walled: only needed so two walled daughters can overlap
-        # while they split (see on_walled_pair_begin). Unwalled <-> unwalled
-        # needs nothing: those shapes share ShapeFilter group 1 and never
-        # collide with each other in the first place.
+        # while they split (see on_walled_pair_begin).
         self.walled_handler = self.space.add_collision_handler(2, 2)
         self.walled_handler.begin = self.on_walled_pair_begin
+
+        # unwalled <-> unwalled: only cells of an animal organism get here
+        # (they leave filter group 1 when they join one, see multicell.py),
+        # and only cells of the SAME organism collide
+        self.animal_handler = self.space.add_collision_handler(1, 1)
+        self.animal_handler.begin = self.on_animal_pair_begin
 
         # play a sound when a cell (walled or not, types 1/2) bumps into sand
         # (type 3). begin fires once per contact, so it isn't spammed per frame.
@@ -242,9 +246,12 @@ class Game:
 
         # camera inputs
         self.camera.handle_input(world_events, keys)
-        # player inputs
+        # player inputs: the player cell (always its organism's head) and
+        # every body cell of the player's organism respond to the same keys,
+        # each with its own acceleration -- agar.io-style (see steering_head)
         for cell in self.cells:
-            if cell.is_player:
+            head = steering_head(cell)
+            if cell.is_player or (head is not None and head.is_player):
                 cell.handle_input(world_events, keys)
 
     def on_cell_begin(self, arbiter, space, data):
@@ -259,6 +266,11 @@ class Game:
         if predator_cell.is_split_sibling_of(prey_cell):
             return False
 
+        # cells of one animal organism still collide, but never hurt each
+        # other (no contact-damage timer)
+        if same_organism(predator_cell, prey_cell):
+            return True
+
         predator_cell.contact_time[prey_cell] = 0.0
         return True
 
@@ -266,9 +278,11 @@ class Game:
         # runs every step while an unwalled cell touches a plant (a contact
         # that begin rejected, like a splitting sibling pair, never gets
         # here). Plant defence: a larger cell touching an exposed corner of
-        # the plant dies -- see plant_defense.py.
+        # the plant dies -- see plant_defense.py. Not between cells of one
+        # animal organism.
         a, b = arbiter.shapes
-        check_vertex_defense(a._object, b._object, arbiter)
+        if not same_organism(a._object, b._object):
+            check_vertex_defense(a._object, b._object, arbiter)
         return True
 
     def on_cell_separate(self, arbiter, space, data):
@@ -283,6 +297,14 @@ class Game:
         # walled <-> walled contact collides as normal
         a, b = arbiter.shapes
         return not a._object.is_split_sibling_of(b._object)
+
+    def on_animal_pair_begin(self, arbiter, space, data):
+        # two unwalled cells, at least one of them in an animal organism:
+        # members of the same organism collide with each other (except a
+        # splitting pair, which overlaps until it separates); any other pair
+        # passes through each other, like all unwalled cells always have
+        a, b = arbiter.shapes
+        return members_collide(a._object, b._object)
 
     def on_sand_begin(self, arbiter, space, data):
         # a cell just touched a sand block -- play the collision sound at the
@@ -554,8 +576,20 @@ class Game:
         self.clock.tick(60)
 
     def kill_cell(self, cell):
+        """Remove `cell` from the game. Returns the animal organism it was a
+        member of (or None) so the caller can rebuild it once all of this
+        frame's deaths are in.
+
+        A parent that just split is NOT a member of any organism any more
+        (Cell.split handed its slot to its daughters), so its removal here
+        never fragments or re-heads an organism -- only actual deaths do."""
+        organism = cell.multicell
+
         # spawn particles for mass
         if cell.is_player:
+            # free camera. If the rest of the player's organism survives,
+            # process_deaths hands control to its new head right after,
+            # which puts the camera back on the player.
             self.camera.type = 1
             cell.is_player = False
 
@@ -564,12 +598,45 @@ class Game:
         # unlink from every multicellular neighbour BEFORE the body leaves
         # the space, so no constraint is left pointing at a removed body
         remove_all_joints(cell)
+        if organism is not None:
+            organism.remove(cell)
         if cell.last_grid_pos is not None:
             grid_cell = self.world.get_lvl1_chunk_local_cell(cell.last_grid_pos)
             if grid_cell is not None and cell in getattr(grid_cell, "entities", ()):
                 grid_cell.entities.remove(cell)
         self.cells.remove(cell)
         self.space.remove(cell.body, cell.shape)
+        return organism
+
+    def give_player_control(self, cell):
+        """Hand player control to `cell` (the replacement head of the
+        player's organism). Exactly one cell is ever the player."""
+        cell.is_player = True
+        self.player.cell = cell
+        self.camera.type = 0
+
+    def process_deaths(self, dead_cells):
+        """Remove this frame's dead cells, then rebuild every animal organism
+        that lost a member -- once each, however many members it lost -- so
+        every surviving connected group has its own Multicell, head and
+        tails. If the player's head died, control goes to the head of the
+        component that kept the original organism (the largest one)."""
+        broken = {}                   # organisms that lost members (ordered set)
+        player_organism = None
+        for cell in dead_cells:
+            if cell not in self.cells:
+                continue
+            was_player = cell.is_player
+            organism = self.kill_cell(cell)
+            if organism is not None:
+                broken[organism] = None
+                if was_player:
+                    player_organism = organism
+
+        for organism in broken:
+            survivors = organism.rebuild()
+            if organism is player_organism and survivors:
+                self.give_player_control(survivors[0].head)
 
     def cull_for_fps(self):
         """Population control: if the frame rate has dropped below
@@ -688,7 +755,8 @@ class Game:
                     self.world.process(cell.body.position, self.space)
                     self.camera.update(cell.body, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT)
                 elif not cell.is_splitting and not cell.has_cell_wall:
-                    if cell.genome.intelligence >= 0:
+                    head = steering_head(cell)
+                    if head is None and cell.genome.intelligence >= 0:
                         # AI re-decides every AI_DECISION_INTERVAL frames,
                         # staggered across cells; in between it keeps moving
                         # along its last chosen direction
@@ -696,6 +764,12 @@ class Game:
                                 or (self.frame + cell.update_phase) % AI_DECISION_INTERVAL == 0):
                             cell.ai_direction = cell.decision_model.decide(cell, self.world)
                         cell.apply_movement(cell.ai_direction, steps)
+                    elif (head is not None and not head.is_player
+                          and head.ai_direction is not None):
+                        # body cell of an AI organism: only the head decides;
+                        # this cell swims the way the head chose (the
+                        # player's body cells get the keys in handle_inputs)
+                        cell.apply_movement(head.ai_direction, steps)
 
                 # mitosis: a splitting daughter slides away from its sibling
                 # until the two no longer overlap (input / AI are paused for
@@ -767,9 +841,9 @@ class Game:
             self.cells.extend(new_cells)
 
         with self.profiler.section("deaths"):
-            for cell in dead_cells:
-                if cell in self.cells:
-                    self.kill_cell(cell)
+            # actual deaths only: remove the cells, then fragment / re-head
+            # the animal organisms they belonged to (see process_deaths)
+            self.process_deaths(dead_cells)
 
         with self.profiler.section("post"):
             self.check_mutations()

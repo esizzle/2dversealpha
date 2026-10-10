@@ -1,8 +1,11 @@
-"""Multicellularity: the physical links between cells.
+"""Multicellularity: the physical links between cells, and (for animals) the
+organism they form.
 
 For now multicellularity is purely physical -- a PinJoint between two cell
 bodies. Each cell still owns its own mass, energy, feeding, movement and
-splitting; nothing is shared through a joint.
+splitting; nothing is shared through a joint. The one organism-level thing
+is animal movement: only an animal organism's head decides the direction,
+and every other member swims that way too (see steering_head).
 
 Bookkeeping
 -----------
@@ -90,7 +93,7 @@ def inherit_joints(parent, heir):
     parent's place). Each old joint is removed -- it references the parent's
     body, which is about to be destroyed -- and a new one is made between the
     heir and the same neighbour, sized for the heir (heir.size + neighbour.size)
-    in case the size gene mutated."""
+    in case the size gene mutated. Works for any number of joints."""
     for neighbour in list(parent.joints):
         remove_joint(parent, neighbour)
         if neighbour.is_dead:
@@ -120,17 +123,22 @@ def division_axis(body, min_speed):
 
 
 # ----------------------------------------------------------------------
-# Growth direction: the ONLY thing plants and fungi do differently
+# Growth direction: the ONLY thing plants, fungi and animals do differently
 # ----------------------------------------------------------------------
-# Kinds of walled multicell, from existing traits only (no fungus gene):
+# Kinds of multicell, from existing traits only (no new genes):
 #   plant  = multicellular AND cell wall AND chloroplast
 #   fungus = multicellular AND cell wall AND NOT chloroplast
+#   animal = multicellular AND NO cell wall AND NO chloroplast
 def is_multicellular_walled(cell):
     return cell.multicellular and cell.has_cell_wall
 
 
 def is_fungal(cell):
     return is_multicellular_walled(cell) and not cell.has_chloroplast
+
+
+def is_multicellular_animal(cell):
+    return cell.multicellular and not cell.has_cell_wall and not cell.has_chloroplast
 
 
 def food_gradient(cell, world):
@@ -190,6 +198,40 @@ def growth_direction(parent, world, min_speed):
     return division_axis(parent.body, min_speed)
 
 
+def animal_growth_direction(parent, split_direction):
+    """World-space unit vector an animal's budding daughter slides out along.
+
+    `split_direction` is the axis an ordinary split would send daughter 2
+    along (Cell.split passes the opposite of the direction of travel, or a
+    random direction when nearly at rest). A cell with no links -- a lone
+    cell founding an organism -- uses it unchanged, so the bud trails behind
+    the moving head.
+
+    A linked cell buds AWAY from its neighbours instead: unwalled cells never
+    collide with each other (shared ShapeFilter group), so a bud sent along
+    the direction of travel would slide straight through the next cell in
+    the body. Away-from-neighbours makes a tail extend outward and a body
+    cell bud sideways, which is where branches come from. When the pulls
+    cancel (a body cell in a straight line), the bud goes out at a right
+    angle to the line, on a random side."""
+    here = parent.body.position
+    away = pymunk.Vec2d(0.0, 0.0)
+    first = None
+    for neighbour in parent.joints:
+        offset = neighbour.body.position - here
+        if offset.length < 1e-6:
+            continue
+        unit = offset.normalized()
+        first = first or unit
+        away -= unit
+    if first is None:
+        return pymunk.Vec2d(*split_direction).normalized()
+    if away.length < 1e-3:
+        side = random.choice((1, -1))
+        return pymunk.Vec2d(-first.y * side, first.x * side)
+    return away.normalized()
+
+
 def begin_multicellular_split(parent, d1, d2, axis):
     """Start a multicellular division using the normal mitosis animation.
 
@@ -199,7 +241,7 @@ def begin_multicellular_split(parent, d1, d2, axis):
       * d1 takes the parent's place: it inherits all of the parent's links
         right away and is NOT pushed by the split -- physics keeps owning it,
         so those links stay where they were;
-      * d2 slides out alone along the velocity axis, and the pair finishes
+      * d2 slides out alone along the growth axis, and the pair finishes
         when their edges meet (d1.size + d2.size apart) instead of when the
         squares' corners clear;
       * at that moment Cell.update_split joins d1 and d2 (see join_cells)
@@ -209,12 +251,13 @@ def begin_multicellular_split(parent, d1, d2, axis):
     are directional (d1 one way, d2 the other), never stacked on top of the
     parent's drift, so a drifting plant that divides doesn't speed up.
 
-    `axis` is the world-space unit growth direction (growth_direction).
-    Plants' axes run along the parent's own x/y axes, so the daughters keep
-    the parent's rotation. A fungal axis can point anywhere, so the
-    daughters are turned to face it -- that keeps the facing edges flush at
-    the normal joint length (joints are centre to centre, so turning d1
-    doesn't disturb the links it inherits)."""
+    `axis` is the world-space unit growth direction (growth_direction for
+    plants / fungi, animal_growth_direction for animals). Plants' axes run
+    along the parent's own x/y axes, so the daughters keep the parent's
+    rotation. Any other axis can point anywhere, so the daughters are turned
+    to face it -- that keeps walled facing edges flush at the normal joint
+    length (joints are centre to centre, so turning d1 doesn't disturb the
+    links it inherits; for round animal cells the angle is cosmetic)."""
     speed = parent.body.velocity.length
 
     local = axis.rotated(-parent.body.angle)
@@ -244,3 +287,224 @@ def finish_multicellular_split(a, b):
     mover.body.velocity = (ax * SPLIT_DRIFT_SPEED, ay * SPLIT_DRIFT_SPEED)
     stayer.body.velocity = (-ax * SPLIT_DRIFT_SPEED, -ay * SPLIT_DRIFT_SPEED)
     join_cells(a, b)
+
+
+# ----------------------------------------------------------------------
+# Animal organisms
+# ----------------------------------------------------------------------
+def structural_links(cell):
+    """Cells `cell` is physically connected to: its joints, plus -- while a
+    multicellular division is still sliding apart -- its split sibling, whose
+    joint only appears when the edges meet. Counting that pending link keeps
+    a half-finished bud part of its organism if a death elsewhere forces a
+    connectivity check mid-split."""
+    links = list(cell.joints)
+    sibling = cell.split_sibling
+    if (sibling is not None and cell.split_joins and sibling not in cell.joints
+            and cell.is_split_sibling_of(sibling)):
+        links.append(sibling)
+    return links
+
+
+# Collisions inside an organism
+# -----------------------------
+# Unwalled cells share ShapeFilter group 1, so they never collide with each
+# other. A cell that joins an animal organism leaves that group (group 0),
+# so its contacts with other unwalled cells reach Game.on_animal_pair_begin,
+# which lets only cells of the SAME organism collide. Cells outside any
+# organism keep group 1 and are filtered as before, so nothing changes for
+# them and the broadphase stays cheap.
+_MEMBER_FILTER = pymunk.ShapeFilter()
+
+
+def _join_organism(cell, organism):
+    """Make `cell` a member of `organism` (the only place membership is
+    set) and let it collide with its fellow members."""
+    cell.multicell = organism
+    if not cell.has_cell_wall:
+        cell.shape.filter = _MEMBER_FILTER
+
+
+def members_collide(a, b):
+    """Collision rule for two unwalled cells whose contact got past the
+    shape filter: they collide only if they belong to the same animal
+    organism -- except a pair still pulling apart from a split, which must
+    overlap until they separate (the usual mitosis rule)."""
+    return same_organism(a, b) and not a.is_split_sibling_of(b)
+
+
+class Multicell:
+    """One animal organism: a connected group of linked animal cells.
+
+        cells -- every member, in a stable order (founder first, buds after)
+        head  -- the member that steers the organism (player input or AI)
+        tails -- every non-head member with exactly one link
+
+    Tails are DERIVED from the joints by refresh_tails() after each structural
+    change (a split, a death), never maintained by hand. Valid shapes:
+    a lone cell (head, no tails), a pair (head + one tail), a branching body
+    (several tails), and a closed loop (several cells, no tails).
+
+    Structure only changes in two ways, kept strictly apart:
+      * reproductive replacement -- replace_parent(), called from Cell.split:
+        the parent's slot goes to its daughters in one step, so the organism
+        never sees the parent "die";
+      * actual death -- remove() from Game.kill_cell, then rebuild() once per
+        frame after every death has been processed, which finds the connected
+        components and gives each its own Multicell with a valid head."""
+
+    def __init__(self, cells, head):
+        self.cells = []
+        self.head = head
+        self.tails = []
+        for cell in cells:
+            _join_organism(cell, self)
+            self.cells.append(cell)
+        self.refresh_tails()
+
+    # -- queries -------------------------------------------------------
+    def degree(self, cell):
+        """Number of links `cell` has to other members of this organism."""
+        return sum(1 for n in structural_links(cell) if n.multicell is self)
+
+    def refresh_tails(self):
+        self.tails = [c for c in self.cells
+                      if c is not self.head and self.degree(c) == 1]
+
+    # -- reproductive replacement --------------------------------------
+    def replace_parent(self, parent, d1, d2):
+        """`parent` has just split into d1 (which took its place and its
+        joints) and d2 (budding off d1). Swap them in as one operation: d1
+        takes the parent's slot and, if the parent was the head, the head
+        role; d2 joins the organism. Call AFTER begin_multicellular_split so
+        the links are already in place when the tails are recomputed."""
+        index = self.cells.index(parent)
+        self.cells[index] = d1
+        self.cells.append(d2)
+        _join_organism(d1, self)
+        _join_organism(d2, self)
+        parent.multicell = None
+        if self.head is parent:
+            self.head = d1
+        self.refresh_tails()
+
+    # -- actual death --------------------------------------------------
+    def remove(self, cell):
+        """A member has died for real (its joints are already gone). Only
+        the membership changes here; call rebuild() once all of this frame's
+        deaths are in, so the structure is checked once, not per death."""
+        if cell in self.cells:
+            self.cells.remove(cell)
+        cell.multicell = None
+        if self.head is cell:
+            self.head = None
+
+    def rebuild(self):
+        """Split this organism into its connected components (iterative DFS
+        over structural_links, limited to members) and give each one a valid
+        head and tails. This object is kept for the component that holds the
+        surviving head -- or, if the head died, for the largest component --
+        and every other component gets a new Multicell.
+
+        Returns the surviving organisms, this one first; [] if no members
+        are left."""
+        members = set(self.cells)
+        seen = set()
+        components = []
+        for start in self.cells:                 # stable order -> deterministic
+            if start in seen:
+                continue
+            found = {start}
+            seen.add(start)
+            stack = [start]
+            while stack:
+                cell = stack.pop()
+                for neighbour in structural_links(cell):
+                    if neighbour in members and neighbour not in seen:
+                        seen.add(neighbour)
+                        found.add(neighbour)
+                        stack.append(neighbour)
+            components.append([c for c in self.cells if c in found])
+
+        if not components:
+            self.cells = []
+            self.tails = []
+            self.head = None
+            return []
+
+        if self.head is not None:
+            kept = next(comp for comp in components if self.head in comp)
+        else:
+            kept = max(components, key=len)      # first of the largest on ties
+
+        self.cells = kept
+        if self.head is None:
+            self.head = choose_head(kept)
+        self.refresh_tails()
+
+        organisms = [self]
+        for comp in components:
+            if comp is not kept:
+                organisms.append(Multicell(comp, choose_head(comp)))
+        return organisms
+
+
+def choose_head(cells):
+    """Deterministic replacement head for a group of connected cells: the
+    first terminal cell (exactly one link inside the group), else the first
+    cell. Cells already marked dead (removed next frame) come last."""
+    group = set(cells)
+
+    def degree(cell):
+        return sum(1 for n in structural_links(cell) if n in group)
+
+    living = [c for c in cells if not c.is_dead] or list(cells)
+    for cell in living:
+        if degree(cell) == 1:
+            return cell
+    return living[0]
+
+
+# ----------------------------------------------------------------------
+# Hooks used by Cell.split and Game (cell.py / main.py)
+# ----------------------------------------------------------------------
+def adopt_daughters(parent, d1, d2):
+    """Reproductive replacement: `parent` has just split into d1 (which took
+    its place and its joints) and d2. A lone animal cell founds a new
+    organism with itself as head first, so every split of an animal goes
+    through the same Multicell.replace_parent. After this the parent belongs
+    to no organism, so its removal in Game.kill_cell is NOT a death as far
+    as the organism is concerned -- no connectivity check, no new head."""
+    organism = parent.multicell
+    if organism is None:
+        organism = Multicell([parent], parent)
+    organism.replace_parent(parent, d1, d2)
+    return organism
+
+
+def is_steering(cell):
+    """Only an organism's head makes movement decisions (player input or
+    AI). Cells outside any organism steer themselves as before."""
+    organism = cell.multicell
+    return organism is None or organism.head is cell
+
+
+def steering_head(cell):
+    """The head whose steering `cell` follows, or None if `cell` steers
+    itself (a head, or a cell outside any organism).
+
+    Agar.io-style animal movement: the head decides the direction (player
+    input or its decision model) and every body cell swims that same way
+    under its own power -- same input, own acceleration and speed cap -- so
+    the whole body flows together instead of the head dragging the rest on
+    its joints. See Game.handle_inputs (player) and the AI branch of
+    Game.update."""
+    organism = cell.multicell
+    if organism is None or organism.head is cell:
+        return None
+    return organism.head
+
+
+def same_organism(a, b):
+    """True if a and b are members of the same animal organism."""
+    return a.multicell is not None and a.multicell is b.multicell

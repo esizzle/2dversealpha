@@ -5,7 +5,7 @@ class Camera:
     def __init__(self, type = 1, position = (0,0), zoom = 1.0, rotation = 0):
         self.x, self.y = position
         self.offset = -self.x, -self.y
-        self.speed = 1
+        self.speed = 5
         self.zoom = zoom
         self.zoom_speed = 0.025
         self.rotation = rotation

@@ -11,7 +11,8 @@ from physics_object import *
 from world_grid import WaterCell, Particle
 from decision_models import create_decision_model
 from multicell import (begin_multicellular_split, finish_multicellular_split,
-                       growth_direction, is_multicellular_walled, remove_all_joints)
+                       growth_direction, is_multicellular_walled, remove_all_joints,
+                       animal_growth_direction, adopt_daughters, same_organism)
 from audio import audio
 from sim_clock import sim_clock
 from global_constants import (
@@ -132,7 +133,7 @@ class Genome:
         self.acceleration = self.max_speed
 
         # mutate cell wall: only cells that never moved can evolve one
-        if not cell.has_moved:
+        if not cell.has_moved and not cell.multicellular:
             if random.random() < self.mutation_rate:
                 self.has_cell_wall = True
 
@@ -311,6 +312,11 @@ class Cell:
         # joint object is stored on both cells (see multicell.py).
         self.joints = {}
 
+        # animal organism this cell belongs to (multicell.Multicell), or None
+        # for a cell that has never been part of one (and for plants / fungi).
+        # Set and cleared only by Multicell -- see multicell.py.
+        self.multicell = None
+
         # object tracking
         self.id = uuid.uuid4()
         self.contact_time = {}
@@ -470,6 +476,9 @@ class Cell:
     def consume_cell(self, cell):
         if cell is self:
             return
+        # an organism never eats its own cells
+        if same_organism(self, cell):
+            return
         # splitting / freshly split cells can't be eaten (this is also what
         # stops overlapping daughters from swallowing each other)
         if not cell.has_cell_wall and not cell.is_invulnerable():
@@ -544,7 +553,7 @@ class Cell:
         space.add(new_cell1.body, new_cell1.shape)
         space.add(new_cell2.body, new_cell2.shape)
 
-        if is_multicellular_walled(self):
+        if self.multicellular or self.multicell is not None:
             # multicellular division: same mitosis animation, but daughter 1
             # stays in the parent's place (and takes over its links) while
             # daughter 2 slides out along the velocity axis; the two are
@@ -552,8 +561,27 @@ class Cell:
             # plants grow along their velocity, fungi toward their own local
             # food gradient (see multicell.growth_direction); the rest of
             # the division is shared
-            axis = growth_direction(self, world, SPLIT_MIN_PARENT_SPEED)
+            if is_multicellular_walled(self):
+                axis = growth_direction(self, world, SPLIT_MIN_PARENT_SPEED)
+            else:
+                # animals: daughter 2 buds out where an ordinary split would
+                # send it (opposite the direction of travel) when the parent
+                # has no links, and away from its neighbours when it has (see
+                # multicell.animal_growth_direction) -- that is where
+                # branches come from
+                axis = animal_growth_direction(self, (-direction[0], -direction[1]))
             begin_multicellular_split(self, new_cell1, new_cell2, axis)
+
+            if self.multicell is not None or not is_multicellular_walled(self):
+                # reproductive replacement, NOT a death: daughter 1 takes the
+                # parent's slot in its animal organism (and the head role, if
+                # the parent was the head -- player control already went to
+                # daughter 1 above), daughter 2 joins it. The parent leaves
+                # the organism here, so removing it in Game.kill_cell
+                # triggers no connectivity check. (Plants / fungi never
+                # belong to one; a member that mutated a wall still does.)
+                adopt_daughters(self, new_cell1, new_cell2)
+
         else:
             # daughter 1 leaves along the parent's heading and picks the parent's
             # forward momentum back up; daughter 2 leaves the opposite way
@@ -577,9 +605,11 @@ class Cell:
 
     def cell_death(self, world):
         # from cell mass get amount of large (5x) particles and small particles
+        # lower consumption efficiency
+        edible_mass = self.mass * 0.4
         if self.has_cell_wall and (self.is_fungi or self.has_chloroplast):
-            num_large_particles = int(self.mass // 6)
-            num_small_particles = int(self.mass % 6)
+            num_large_particles = int(edible_mass // 6)
+            num_small_particles = int(edible_mass % 6)
             total = num_small_particles + num_large_particles
             if total == 0:
                 return
@@ -589,8 +619,8 @@ class Cell:
                 choices = [0] * num_small_particles + [3] * num_large_particles
 
         else:
-            num_large_particles = int(self.mass // 5)
-            num_small_particles = int(self.mass % 5)
+            num_large_particles = int(edible_mass // 5)
+            num_small_particles = int(edible_mass % 5)
             total = num_small_particles + num_large_particles
             if total == 0:
                 return
