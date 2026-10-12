@@ -87,7 +87,7 @@ class Genome:
 
         # mutate size: size increases in less material dense areas, and decreases in more material dense areas
         if env.chunk_material == 1:
-            if random.random() < self.mutation_rate or (cell.is_player and cell.generation % 4 == 0):
+            if random.random() < self.mutation_rate or ((cell.is_player or (cell.multicell is not None and cell.multicell.is_player)) and cell.generation % 4 == 0):
                 # self.size += random.choice([1, 2, 3, 4])
                 # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
                 self.max_mass += random.choice([2, 4, 6, 8])
@@ -96,7 +96,7 @@ class Genome:
 
         if env.chunk_material == 2:
             if not self.has_cell_wall:
-                if random.random() < self.mutation_rate or (cell.is_player and cell.generation % 4 == 0):
+                if random.random() < self.mutation_rate or ((cell.is_player or (cell.multicell is not None and cell.multicell.is_player)) and cell.generation % 3 == 0):
                     # self.size -= random.choice([1, 2, 3, 4])
                     # self.size = max(self.size_range[0], min(self.size, self.size_range[1]))
                     self.max_mass -= random.choice([2, 4, 6, 8])
@@ -129,6 +129,10 @@ class Genome:
         for _ in range(cell.amt_type2_particles):
             if random.random() < self.mutation_rate:
                 self.max_speed = max(self.max_speed - 5, self.speed_range[0])
+
+        for _ in range(cell.amt_type3_particles):
+            if random.random() < 2*self.mutation_rate:
+                self.multicellular = True
 
         self.acceleration = self.max_speed
 
@@ -281,6 +285,7 @@ class Cell:
         self.food_check_pos = None    # where food was last checked (None = check now)
         self.amt_type1_particles = 0
         self.amt_type2_particles = 0
+        self.amt_type3_particles = 0
 
         # booleans
         self.is_dead = False
@@ -472,6 +477,8 @@ class Cell:
                 self.amt_type1_particles += 1
             if particle.type == 2:
                 self.amt_type2_particles += 1
+            if particle.type == 3:
+                self.amt_type3_particles += 1
 
     def consume_cell(self, cell):
         if cell is self:
@@ -581,6 +588,9 @@ class Cell:
                 # triggers no connectivity check. (Plants / fungi never
                 # belong to one; a member that mutated a wall still does.)
                 adopt_daughters(self, new_cell1, new_cell2)
+
+            if self.multicell is not None and new_cell1.is_player:
+                self.multicell.is_player = True
 
         else:
             # daughter 1 leaves along the parent's heading and picks the parent's

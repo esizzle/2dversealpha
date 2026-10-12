@@ -71,7 +71,7 @@ class Game:
         # explicitly, so the build looks exactly like the dev version and
         # does not depend on the fonts installed on the player's machine.
         # To switch to Arcade Classic later:
-        #   pygame.font.Font(resource_path("assets/fonts/Arcade_Classic.ttf"), 18)
+        #   pygame.font.Font(resource_path("assets/fonts/Aasrcade_Classic.ttf"), 18)
         # (glyph metrics change, so the hard-coded HUD offsets need a pass).
         self.font = pygame.font.Font(None, 18)
 
@@ -485,18 +485,48 @@ class Game:
         self.journal.add_behavioural_mutation("Random Movement", "Terrain Detection")
         self.journal.add_behavioural_mutation("Terrain Avoidance", "Cell Detection")
 
+    def visible_cells(self):
+        """Cells whose shape overlaps the view, found with pymunk's spatial
+        index (in C) instead of testing every cell in Python. The margin
+        (world px) covers the invulnerability ring, which reaches past the
+        shape's own bounding box."""
+        zoom = self.camera.zoom
+        ox, oy = self.camera.offset
+        m = 25
+        bb = pymunk.BB(-ox / zoom - m, -oy / zoom - m,
+                       (WORLD_WINDOW_WIDTH - ox) / zoom + m,
+                       (WORLD_WINDOW_HEIGHT - oy) / zoom + m)
+        visible = set()
+        for shape in self.space.bb_query(bb, pymunk.ShapeFilter()):
+            cell = getattr(shape, "_object", None)   # only cell shapes have one
+            if cell is None:
+                continue
+            visible.add(cell)
+            # a mid-split pair is drawn by its lead daughter, so the lead
+            # must draw when only its sibling is in view
+            if cell.split_sibling is not None:
+                visible.add(cell.split_sibling)
+        return visible
+
     def draw_game_world(self):
         self.world_surface.fill(BLACK)
 
-        # draw grid
-        self.world.render_chunks(self.world_surface, self.camera)
+        with self.profiler.section("render_chunks"):
+            self.world.render_chunks(self.world_surface, self.camera)
 
-        # draw cells
-        for cell in self.cells:
-            cell.draw(self.world_surface, self.camera.zoom, self.camera.offset)
+        with self.profiler.section("render_cells"):
+            zoom = self.camera.zoom
+            offset = self.camera.offset
+            surface = self.world_surface
+            visible = self.visible_cells()
+            # iterate self.cells (not the query result) so draw order stays
+            # stable frame to frame; a set lookup is ~50 ns per cell
+            for cell in self.cells:
+                if cell in visible:
+                    cell.draw(surface, zoom, offset)
 
-        if SHOW_CELL_JOINTS:
-            self.draw_joints()
+            if SHOW_CELL_JOINTS:
+                self.draw_joints(visible)
 
         # WORLD BOX
         pygame.draw.rect(self.world_surface, BORDER, (0, 0, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT), 1)
@@ -504,14 +534,17 @@ class Game:
         self.screen.blit(self.world_surface,
                          ((SCREEN_WIDTH - WORLD_WINDOW_WIDTH) / 2, (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) / 2))
 
-    def draw_joints(self):
-        """A thin centre-to-centre line per multicellular joint. Each joint
-        is stored on both of its cells, so it is drawn from one side only."""
+    def draw_joints(self, visible):
+        """A thin centre-to-centre line per multicellular joint, skipped when
+        both ends are off-screen. Each joint is stored on both of its cells,
+        so it is drawn from one side only."""
         zoom = self.camera.zoom
         ox, oy = self.camera.offset
         for cell in self.cells:
             for neighbour in cell.joints:
                 if id(cell) > id(neighbour):
+                    continue
+                if cell not in visible and neighbour not in visible:
                     continue
                 p1 = cell.body.position
                 p2 = neighbour.body.position

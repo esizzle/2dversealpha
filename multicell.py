@@ -357,6 +357,8 @@ class Multicell:
         self.cells = []
         self.head = head
         self.tails = []
+
+        self.is_player = False
         for cell in cells:
             _join_organism(cell, self)
             self.cells.append(cell)

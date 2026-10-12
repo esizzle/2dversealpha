@@ -550,29 +550,26 @@ class World:
     def render_chunks(self, surface, camera):
         zoom = camera.zoom
         ox, oy = camera.offset
-
         screen_w, screen_h = surface.get_size()
+        chunk_px = LVL1_CHUNK_SIZE * CELL_SIZE * zoom
 
-        cell_px = CELL_SIZE * zoom
-        chunk_px = LVL1_CHUNK_SIZE * cell_px
+        # visible chunk bounds: floor() already includes partly visible
+        # chunks, and nothing a chunk draws extends past its edge
+        min_cx = max(int((-ox) // chunk_px), 0)
+        max_cx = min(int((screen_w - ox) // chunk_px), LVL1_GRID_MAX)
+        min_cy = max(int((-oy) // chunk_px), 0)
+        max_cy = min(int((screen_h - oy) // chunk_px), LVL1_GRID_MAX)
 
-        # visible chunk bounds
-        min_cx = int((-ox) // chunk_px) - 1
-        max_cx = int((screen_w - ox) // chunk_px) + 1
-        min_cy = int((-oy // chunk_px) - 1)
-        max_cy = int((screen_h - oy) // chunk_px) + 1
+        if zoom < 0.1:
+            # far out: one outline per lvl2 chunk (each covers 2x2 lvl1)
+            for X in range(min_cx // 2, max_cx // 2 + 1):
+                for Y in range(min_cy // 2, max_cy // 2 + 1):
+                    self.lvl2chunks[(X, Y)].draw(surface, camera)
+            return
 
         for cx in range(min_cx, max_cx + 1):
             for cy in range(min_cy, max_cy + 1):
-                if cx < 0 or cy < 0:
-                    continue
-                if cx > LVL1_GRID_MAX or cy > LVL1_GRID_MAX:
-                    continue
-
-                if zoom < 0.1:
-                    self.lvl2chunks[(cx // 2, cy // 2)].draw(surface, camera)
-                else:
-                    self.lvl1chunks[(cx, cy)].draw(surface, camera)
+                self.lvl1chunks[(cx, cy)].draw(surface, camera)
 
     def draw_loaded_chunks(self, surface, camera):
         for chunk in self.loaded_lvl1chunks:

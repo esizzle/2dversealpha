@@ -29,21 +29,20 @@ _now = time.perf_counter
 
 
 class _Section:
-    __slots__ = ("prof", "name")
+    __slots__ = ("prof", "name", "start")
 
     def __init__(self, prof, name):
         self.prof = prof
         self.name = name
+        self.start = 0.0
 
     def __enter__(self):
-        self.prof._start = _now()
+        self.start = _now()
         return self
 
     def __exit__(self, *exc):
-        # accumulate elapsed into this section's bucket for the current frame
-        self.prof._accum[self.name] = (
-            self.prof._accum.get(self.name, 0.0) + (_now() - self.prof._start)
-        )
+        acc = self.prof._accum
+        acc[self.name] = acc.get(self.name, 0.0) + (_now() - self.start)
         return False
 
 
