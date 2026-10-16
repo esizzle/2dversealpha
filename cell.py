@@ -125,10 +125,18 @@ class Genome:
         for _ in range(cell.amt_type1_particles):
             if random.random() < self.mutation_rate:
                 self.max_speed = min(self.max_speed + 5, self.speed_range[1])
+            if random.random() < self.mutation_rate and env.chunk_material != 2:
+                self.max_mass += random.choice([2, 4, 6, 8])
+                self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
+                self.size = self.max_mass // 2
 
         for _ in range(cell.amt_type2_particles):
             if random.random() < self.mutation_rate:
                 self.max_speed = max(self.max_speed - 5, self.speed_range[0])
+            if random.random() < self.mutation_rate:
+                self.max_mass -= random.choice([2, 4, 6, 8])
+                self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
+                self.size = self.max_mass // 2
 
         for _ in range(cell.amt_type3_particles):
             if random.random() < 2*self.mutation_rate:
@@ -168,9 +176,9 @@ class Genome:
         # only evolves -- where food is scarce. Rich water keeps cells at Level 0.
         # level 0 intelligence: if in water and high nutrients --> level 0 intelligence (random movement)
         if not self.has_cell_wall:
-            if env.chunk_material == 1 and env.has_particles:
+            if env.chunk_material == 2 and env.has_particles:
                 # decrease chance of first form of intelligence evolving
-                if random.random() < self.mutation_rate/2:
+                if random.random() < self.mutation_rate:
                     self.intelligence = max(0, self.intelligence)
             if env.chunk_material == 2 and env.has_particles:
                 if random.random() < self.mutation_rate:

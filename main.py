@@ -139,10 +139,21 @@ class Game:
         self.camera = Camera(type=0)
 
         self.player = Player((11500, 11500), self.space)
-        # plant_g = Genome(intelligence=-1)
-        # plant_g.has_cell_wall = True
-        # plant = Cell((11500, 11400), plant_g)
-        # self.space.add(plant.body, plant.shape)
+        plant_g = Genome(intelligence=-1)
+        plant_g.has_cell_wall = True
+        plant_g.has_chloroplast = True
+        plant_g.color = LIME
+        plant = Cell((11500, 11400), plant_g)
+        self.space.add(plant.body, plant.shape)
+        plant.body.velocity = 20,-20
+        fungi_g = Genome(intelligence=-1)
+        fungi_g.has_cell_wall = True
+        fungi_g.has_chloroplast = False
+        fungi_g.is_fungi = True
+        fungi_g.color = FUNGI
+        fungi = Cell((11500, 11600), fungi_g)
+        fungi.body.velocity = -20,20
+        self.space.add(fungi.body, fungi.shape)
 
 
         # mutations tracking
@@ -152,8 +163,9 @@ class Game:
 
         self.cells = []
         self.cells.append(self.player.cell)
-        # self.cells.append(plant)
-        self.previous_cell_length = 1
+        self.cells.append(plant)
+        self.cells.append(fungi)
+        self.previous_cell_length = 3
 
         # initial chunk (and hitbox) load around the player
         pos = self.world.world_to_lvl1_chunk(self.player.cell.body.position)
@@ -428,11 +440,28 @@ class Game:
         # Generation
         self.draw_stat_text("GENERATION", self.player.cell.generation, 20)
 
+        # Intelligence
+        if self.player.cell.genome.intelligence == -1:
+            intelligence = "None"
+        elif self.player.cell.genome.intelligence == 0:
+            intelligence = "Random"
+        elif self.player.cell.genome.intelligence == 1:
+            intelligence = "Terrain Aware"
+        elif self.player.cell.genome.intelligence == 2:
+            intelligence = "Nutrient Aware"
+        elif self.player.cell.genome.intelligence == 3:
+            intelligence = "Cell Aware"
+        elif self.player.cell.genome.intelligence == 4:
+            intelligence = "Cell Type Aware"
+        else:
+            intelligence = "Undefined"
+        self.draw_stat_text("INTELLIGENCE", intelligence, 45)
+
         # Mass
-        self.draw_stat_bar(self.player.cell.mass, self.player.cell.max_mass, "MASS", "pg", 52)
+        self.draw_stat_bar(self.player.cell.mass, self.player.cell.max_mass, "MASS", "pg", 75)
 
         # Energy
-        self.draw_stat_bar(self.player.cell.energy, self.player.cell.max_energy, "ENERGY", "nJ", 89, 1000)
+        self.draw_stat_bar(self.player.cell.energy, self.player.cell.max_energy, "ENERGY", "nJ", 110, 1000)
 
         # OUTLINE
         pygame.draw.rect(self.stat_box_surface, BORDER, (0, 0, STAT_BOX_W, STAT_BOX_H), 1)
@@ -858,8 +887,12 @@ class Game:
                         continue
                     cell.contact_time[other] += cdt
                     cell.total_contact_time += cdt
-                    if cell.contact_time[other] >= 0.5:
-                        other.kill(cell)
+                    if other.genome.is_fungi:
+                        if cell.contact_time[other] >= 0.5:
+                            other.kill(cell)
+                    else:
+                        if cell.contact_time[other] >= 0.3:
+                            other.kill(cell)
 
                 # death by consumption
                 for entity in cell.nearby_entities:
