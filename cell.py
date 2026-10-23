@@ -7,7 +7,7 @@ import random
 
 from pymunk import Vec2d
 
-from colors import BLACK, LIME, ORANGE, RED, FUNGI
+from colors import BLACK, LIME, ORANGE, RED, FUNGI, LIGHT_BLUE, MAGENTA, MED_LIGHT_RED
 from env_features import EnvFeatures
 from physics_object import *
 from world_grid import WaterCell, Particle
@@ -27,6 +27,24 @@ CELL_STATE_SPLITTING = "splitting"
 
 # The gap must grow by at least this much (px) per frame to count as progress.
 _SPLIT_PROGRESS_EPSILON = 0.01
+
+# ----------------------------------------------------------------------
+# Speed colour gradient (see Genome.speed_color)
+# ----------------------------------------------------------------------
+# A cell's colour is blended between these stops by its genome.max_speed.
+# Each entry is (max_speed, (r, g, b)), listed from slowest to fastest.
+# Change a colour or a speed here; you can also add or remove stops.
+# Speeds below the first stop / above the last use that stop's colour.
+SPEED_SLOW_COLOR = LIGHT_BLUE        # (36, 159, 222)
+SPEED_MID_COLOR = MAGENTA            # (188, 74, 155)  <- swap this freely
+SPEED_FAST_COLOR = MED_LIGHT_RED     # (223, 62, 35)
+
+SPEED_COLOR_STOPS = [
+    (20,  SPEED_SLOW_COLOR),
+    (40,  SPEED_MID_COLOR),
+    (120, SPEED_FAST_COLOR),
+    (240, (255,255,255))
+]
 
 
 class Genome:
@@ -72,6 +90,29 @@ class Genome:
 
         #multicularity
         self.multicellular = False
+
+        self.update_speed_color()
+
+    # --- speed colour ------------------------------------------------------
+    def speed_color(self):
+        """The colour for this genome's max_speed, blended linearly between
+        the two SPEED_COLOR_STOPS (top of this file) on either side of it."""
+        speed = self.max_speed
+        stops = SPEED_COLOR_STOPS
+        if speed <= stops[0][0]:
+            return tuple(stops[0][1])
+        for (s0, c0), (s1, c1) in zip(stops, stops[1:]):
+            if speed <= s1:
+                f = (speed - s0) / (s1 - s0) if s1 > s0 else 1.0
+                return tuple(round(c0[i] + (c1[i] - c0[i]) * f) for i in range(3))
+        return tuple(stops[-1][1])
+
+    def update_speed_color(self):
+        """Set self.color from max_speed. Plants and fungi keep their own
+        colours: photosynthesis rates are looked up by colour (see
+        PHOTOSYNTHESIS_RATES in main.py)."""
+        if not (self.has_chloroplast or self.is_fungi):
+            self.color = self.speed_color()
 
     def mutate_gene(self, env: EnvFeatures, cell):
         """Mutate this genome based on the environment (env) and the parent
@@ -213,6 +254,9 @@ class Genome:
         for _ in range(cell.amt_type3_particles):
             if random.random() < 2*self.mutation_rate:
                 self.multicellular = True
+
+        # colour follows the (possibly mutated) speed
+        self.update_speed_color()
 
 class Cell:
     def __init__(self, position: tuple, genome: Genome, is_player=False):
@@ -708,29 +752,78 @@ class Cell:
                 return
             choices = [0] * num_small_particles + [1] * num_large_particles
 
-        # spawn particles around radius of dead cell
-        for i in range(total):
-            rx = self.size * math.cos(2 * i * math.pi / total)
-            ry = self.size * math.sin(2 * i * math.pi / total)
+        # Spawn particles around the perimeter of the dead cell
+        random.shuffle(choices)
+
+        for i, choice in enumerate(choices):
+            if self.has_cell_wall:
+                # Distribute particles evenly along a square perimeter
+                t = (i / total) * 4
+                side = int(t)
+                offset = (t % 1) * 2 * self.size - self.size
+
+                if side == 0:
+                    rx, ry = offset, -self.size
+                elif side == 1:
+                    rx, ry = self.size, offset
+                elif side == 2:
+                    rx, ry = -offset, self.size
+                else:
+                    rx, ry = -self.size, -offset
+
+            else:
+                # Distribute particles evenly around a circle
+                angle = 2 * math.pi * i / total
+                rx = self.size * math.cos(angle)
+                ry = self.size * math.sin(angle)
 
             wx = self.body.position.x + rx
             wy = self.body.position.y + ry
-            choice = random.choice(choices)
-            choices.remove(choice)
 
-            particle = Particle((wx, wy), choice)
-
-            # get water cell at world position
+            # Get grid position and corresponding cell
             gx, gy = world.world_to_grid_cell((wx, wy))
-
-            # get local cell inside chunk
             cell = world.get_lvl1_chunk_local_cell((gx, gy))
 
-            if isinstance(cell, WaterCell):
-                cell.add_particle(particle)
-                world.mark_food_changed((gx, gy))
-            else:
-                print("Error, could not find Water Cell!")
+            # Fallback: search nearby grid cells if initial position is invalid
+            if not isinstance(cell, WaterCell):
+                found = False
+                max_radius = 5
+
+                for radius in range(1, max_radius + 1):
+                    candidates = []
+
+                    # Search only the perimeter of each expanding square
+                    for dx in range(-radius, radius + 1):
+                        for dy in range(-radius, radius + 1):
+                            if max(abs(dx), abs(dy)) != radius:
+                                continue
+
+                            nx, ny = gx + dx, gy + dy
+                            nearby = world.get_lvl1_chunk_local_cell((nx, ny))
+
+                            if isinstance(nearby, WaterCell):
+                                candidates.append((nx, ny, nearby))
+
+                    if candidates:
+                        # Choose nearest valid water cell in this ring
+                        gx, gy, cell = min(
+                            candidates,
+                            key=lambda c: (c[0] - gx) ** 2 + (c[1] - gy) ** 2
+                        )
+
+                        # Move particle to the center of the valid grid cell
+                        # Assumes a world.grid_cell_to_world() method exists
+                        wx, wy = world.grid_cell_to_world((gx, gy))
+                        found = True
+                        break
+
+                if not found:
+                    print(f"FAILED TO SPAWN: No WaterCell within {max_radius} grid cells")
+                    continue
+
+            particle = Particle((wx, wy), choice)
+            cell.add_particle(particle)
+            world.mark_food_changed((gx, gy))
 
     # ------------------------------------------------------------------
     # Splitting (mitosis):  normal -> splitting -> normal + invulnerability

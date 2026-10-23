@@ -494,6 +494,50 @@ def adopt_daughters(parent, d1, d2):
     return organism
 
 
+# ----------------------------------------------------------------------
+# Player rearrangement (drag a cell of your own organism; see main.py)
+# ----------------------------------------------------------------------
+# Both operations only change the dragged cell's own joints, then hand the
+# organism to rebuild() -- the same connectivity pass a death triggers -- so
+# orphaned branches split off into their own organisms with valid heads and
+# tails, and the head (and with it player control) stays where it was.
+# Orphaned branches are NOT reconnected automatically.
+def can_rearrange(cell):
+    """True if `cell` may be dragged: a living, settled member of an animal
+    organism with at least two cells."""
+    organism = cell.multicell
+    return (organism is not None and len(organism.cells) >= 2
+            and not cell.is_dead and not cell.is_splitting)
+
+
+def detach_cell(cell):
+    """Cut every link of `cell`. It becomes its own (one-cell) organism, and
+    any section that was only connected through it splits off. Returns the
+    organisms rebuild() produced (the head's organism first), or [] if
+    `cell` belongs to no organism."""
+    organism = cell.multicell
+    if organism is None:
+        return []
+    remove_all_joints(cell)
+    return organism.rebuild()
+
+
+def reattach_cell(cell, target):
+    """Move `cell`'s connection to `target`: drop all of its links, link it to
+    `target` only, then rebuild. Refuses (returns None) a self-link, a target
+    in another organism, or a cell / target that is dead or mid-split.
+    Position the body next to the target BEFORE calling this, so the new
+    joint is created at its rest length."""
+    if (target is cell or not same_organism(cell, target)
+            or cell.is_dead or target.is_dead
+            or cell.is_splitting or target.is_splitting):
+        return None
+    organism = cell.multicell
+    remove_all_joints(cell)
+    join_cells(cell, target)
+    return organism.rebuild()
+
+
 def is_steering(cell):
     """Only an organism's head makes movement decisions (player input or
     AI). Cells outside any organism steer themselves as before."""

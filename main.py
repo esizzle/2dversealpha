@@ -9,7 +9,8 @@ from journal import Journal
 from settings import SettingsPanel, SettingsTab
 from audio import audio
 from sim_clock import sim_clock
-from multicell import remove_all_joints, same_organism, steering_head, members_collide
+from multicell import (remove_all_joints, same_organism, steering_head, members_collide,
+                       can_rearrange, detach_cell, reattach_cell)
 from plant_defense import check_vertex_defense
 from global_constants import (SHOW_CELL_JOINTS, AI_DECISION_INTERVAL,
                               SIM_LOD, SIM_LOD_FULL_RADIUS, SIM_LOD_MAX_INTERVAL,
@@ -42,6 +43,16 @@ VEL_HISTORY_SECONDS = 10.0    # x-axis span (default)
 HUD_PAD = 8              # padding from the screen edges for the FPS counter / tab
 SETTINGS_TAB_W = 90
 SETTINGS_TAB_H = 26
+
+# Cell dragging (rearranging the player's own organism). Pressing a cell
+# always selects it (stat panels). Only holding the button for DRAG_HOLD_MS
+# turns the press into a drag; releasing sooner is a plain click and never
+# changes the organism, even if the mouse wobbled a little.
+DRAG_HOLD_MS = 250
+DRAG_ATTACH_COLOR = MED_LIGHT_GREEN   # ghost over a valid attach target
+DRAG_DETACH_COLOR = GOLD              # ghost over empty space
+DRAG_INVALID_COLOR = RED              # ghost over an invalid spot
+DRAG_TETHER_COLOR = (150, 150, 150)   # line from the real cell to the ghost
 
 # Seed the journal with a few placeholder rows at startup so the panel is
 # visible immediately. These are UI samples only -- they do NOT drive any game
@@ -184,6 +195,11 @@ class Game:
         # self.inspected_cell, which falls back to the player.
         self.selected_cell = None
 
+        # in-progress drag of one of the player's own cells, or None:
+        # {"cell": Cell, "t0": press time (ms), "active": bool}. Not active
+        # until held for DRAG_HOLD_MS (see update_drag_hold).
+        self.drag = None
+
         # initial chunk (and hitbox) load around the player
         pos = self.world.world_to_lvl1_chunk(self.player.cell.body.position)
         self.world.load_chunks(pos, self.space)
@@ -248,6 +264,10 @@ class Game:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
+                    if self.drag is not None:
+                        # ESC first cancels a cell drag in progress
+                        self.drag = None
+                        continue
                     # ESC toggles Settings; it never quits (Quit lives in the panel)
                     self.toggle_settings()
                     continue
@@ -257,6 +277,15 @@ class Game:
                     self.profiler.request_deep_profile()
             elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
                                 pygame.MOUSEMOTION):
+                # 0. a cell drag in progress owns the left button until it is
+                #    released (wherever that is); right-click cancels it
+                if self.drag is not None:
+                    if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                        self.end_drag(event.pos)
+                        continue
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                        self.drag = None
+                        continue
                 # 1. the Settings tab (always visible, always clickable)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
                         and self.settings_tab.hit(event.pos):
@@ -271,13 +300,24 @@ class Game:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     jx, jy = self.journal_pos
                     self.journal.handle_click((event.pos[0] - jx, event.pos[1] - jy))
-                # 4. left-click inside the game world selects the cell under
-                #    the cursor (or clears the selection on empty space)
+                # 4. left-click inside the game world: pressing on one of the
+                #    player's own organism cells starts a (pending) drag;
+                #    anything else selects the cell under the cursor (or
+                #    clears the selection on empty space)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
                         and self.world_rect().collidepoint(event.pos):
-                    self.select_cell_at(event.pos)
+                    cell = self.cell_at(event.pos)
+                    # a press always selects; holding it on one of your own
+                    # cells may turn it into a drag (see update_drag_hold)
+                    self.set_selected_cell(cell)
+                    if cell is not None and self.can_drag(cell):
+                        self.drag = {"cell": cell, "t0": pygame.time.get_ticks(),
+                                     "active": False}
                     continue
             world_events.append(event)
+
+        # a press held long enough on one of the player's cells becomes a drag
+        self.update_drag_hold()
 
         # camera inputs
         self.camera.handle_input(world_events, keys)
@@ -315,20 +355,177 @@ class Game:
             self.selected_cell = cell
             self.vel_history.clear()
 
-    def select_cell_at(self, screen_pos):
-        """Pick the cell under a screen-space point. A few px of slack so
-        tiny, zoomed-out cells are still clickable."""
+    def screen_to_world(self, screen_pos):
+        """Screen-space point -> world-space Vec2d (through the world
+        viewport's position, then the camera's offset and zoom)."""
         wr = self.world_rect()
-        wx, wy = self.camera.screen_to_world(screen_pos[0] - wr.x, screen_pos[1] - wr.y)
+        return pymunk.Vec2d(*self.camera.screen_to_world(screen_pos[0] - wr.x,
+                                                         screen_pos[1] - wr.y))
+
+    def cell_at(self, screen_pos):
+        """The living cell under a screen-space point, or None. A few px of
+        slack so tiny, zoomed-out cells are still clickable."""
+        point = self.screen_to_world(screen_pos)
         slack = 4 / max(self.camera.zoom, 0.01)
         best, best_dist = None, float("inf")
-        for info in self.space.point_query((wx, wy), slack, pymunk.ShapeFilter()):
+        for info in self.space.point_query(point, slack, pymunk.ShapeFilter()):
             cell = getattr(info.shape, "_object", None)
             if cell is None or cell.is_dead:
                 continue
             if info.distance < best_dist:
                 best, best_dist = cell, info.distance
-        self.set_selected_cell(best)
+        return best
+
+    def select_cell_at(self, screen_pos):
+        self.set_selected_cell(self.cell_at(screen_pos))
+
+    # ------------------------------------------------------------------
+    # Cell dragging: rearrange / detach cells of the player's organism.
+    # Input + preview only; the structural change itself is
+    # multicell.detach_cell / reattach_cell (joints, then rebuild()).
+    # ------------------------------------------------------------------
+    def can_drag(self, cell):
+        """Only cells of the player's own multicellular organism."""
+        organism = self.player.cell.multicell
+        return organism is not None and cell.multicell is organism and can_rearrange(cell)
+
+    def update_drag_hold(self):
+        """Once the button has been held on a cell for DRAG_HOLD_MS, the
+        press becomes a drag (ghost appears). Called once per frame."""
+        drag = self.drag
+        if drag is not None and not drag["active"] \
+                and pygame.time.get_ticks() - drag["t0"] >= DRAG_HOLD_MS:
+            drag["active"] = True
+
+    def end_drag(self, screen_pos):
+        drag, self.drag = self.drag, None
+        if not drag["active"]:
+            # released before the hold time: a plain click. The press
+            # already selected the cell; the organism is left alone.
+            return
+        self.apply_drop(drag["cell"], screen_pos)
+
+    def _spot_is_clear(self, cell, pos, ignore=()):
+        """True if `cell`'s body could sit at world point `pos` without
+        overlapping terrain or any other cell (its own shape and the cells in
+        `ignore` don't count). 1 px of tolerance so edge-to-edge is fine."""
+        reach = max(cell.size - 1, 0.5)
+        for info in self.space.point_query(pos, reach, pymunk.ShapeFilter()):
+            shape = info.shape
+            if shape is cell.shape or shape.sensor:
+                continue
+            if getattr(shape, "_object", None) in ignore:
+                continue
+            return False
+        return True
+
+    def _attach_spot(self, cell, target, toward):
+        """Where `cell` goes when attached to `target`: edge to edge with it
+        (the joint's rest length, so nothing stretches), on the side facing
+        `toward` (the cursor). If that spot is blocked, try angles further
+        round the target, alternating sides; None if all are blocked."""
+        centre = target.body.position
+        direction = toward - centre
+        if direction.length < 1e-6:
+            direction = cell.body.position - centre
+        if direction.length < 1e-6:
+            direction = pymunk.Vec2d(1, 0)
+        direction = direction.normalized()
+        distance = cell.size + target.size
+        for k in range(12):
+            angle = ((k + 1) // 2) * (math.pi / 6) * (1 if k % 2 else -1)
+            spot = centre + direction.rotated(angle) * distance
+            if self._spot_is_clear(cell, spot, ignore=(target,)):
+                return spot
+        return None
+
+    def resolve_drop(self, cell, screen_pos):
+        """What releasing the dragged `cell` at `screen_pos` would do, without
+        doing it -- the preview and the actual drop share this, so what you
+        see is what happens. Returns (kind, target, spot):
+            ("cancel",  None,   None)   released over itself
+            ("attach",  target, spot)   onto a cell of the same organism
+            ("detach",  None,   spot)   over clear, empty space
+            ("invalid", target, spot)   anything else (another organism's
+                                        cell, terrain, outside the view...)"""
+        if not self.world_rect().collidepoint(screen_pos) or not self.can_drag(cell):
+            return "invalid", None, None
+        point = self.screen_to_world(screen_pos)
+        under = self.cell_at(screen_pos)
+        if under is cell:
+            return "cancel", None, None
+        if under is not None:
+            if not same_organism(under, cell) or under.is_splitting:
+                return "invalid", under, point
+            spot = self._attach_spot(cell, under, point)
+            if spot is None:
+                return "invalid", under, point
+            return "attach", under, spot
+        if self._spot_is_clear(cell, point):
+            return "detach", None, point
+        return "invalid", None, point
+
+    def _move_body(self, cell, pos, velocity):
+        body = cell.body
+        body.position = pos
+        body.velocity = velocity
+        body.angular_velocity = 0
+        if body.space is not None:
+            body.space.reindex_shapes_for_body(body)
+
+    def apply_drop(self, cell, screen_pos):
+        kind, target, spot = self.resolve_drop(cell, screen_pos)
+        if kind == "attach":
+            # move first, so the new joint is made at its rest length
+            self._move_body(cell, spot, target.body.velocity)
+            reattach_cell(cell, target)
+        elif kind == "detach":
+            self._move_body(cell, spot, (0, 0))
+            detach_cell(cell)
+        # "cancel" / "invalid": nothing changes -- the original links stay
+
+    def draw_drag_preview(self):
+        """While dragging: a ring on the real cell, a tether to a ghost that
+        follows the cursor (snapped next to the target when attaching), and
+        the ghost coloured by what a release would do."""
+        drag = self.drag
+        if drag is None or not drag["active"]:
+            return
+        cell = drag["cell"]
+        if cell.is_dead:
+            return
+        kind, target, spot = self.resolve_drop(cell, pygame.mouse.get_pos())
+
+        surf = self.world_surface
+        zoom = self.camera.zoom
+        ox, oy = self.camera.offset
+
+        def to_screen(p):
+            return p[0] * zoom + ox, p[1] * zoom + oy
+
+        def outline(c, centre, color, pad, width):
+            r = c.size * zoom + pad
+            x, y = centre
+            if c.has_cell_wall:
+                pygame.draw.rect(surf, color, (x - r, y - r, r * 2, r * 2), width)
+            else:
+                pygame.draw.circle(surf, color, (x, y), r, width)
+
+        source = to_screen(cell.body.position)
+        outline(cell, source, DRAG_TETHER_COLOR, 4, 1)
+        if kind == "cancel" or spot is None:
+            return
+
+        color = {"attach": DRAG_ATTACH_COLOR,
+                 "detach": DRAG_DETACH_COLOR}.get(kind, DRAG_INVALID_COLOR)
+        ghost = to_screen(spot)
+        pygame.draw.line(surf, DRAG_TETHER_COLOR, source, ghost, 1)
+        if target is not None:
+            target_pos = to_screen(target.body.position)
+            outline(target, target_pos, color, 4, 1)
+            if kind == "attach":
+                pygame.draw.line(surf, color, ghost, target_pos, 2)   # the new link
+        outline(cell, ghost, color, 0, 2)
 
     def draw_selection_marker(self, visible):
         """A gold ring/box just outside the selected cell."""
@@ -723,6 +920,7 @@ class Game:
                 self.draw_joints(visible)
 
             self.draw_selection_marker(visible)
+            self.draw_drag_preview()
 
         # WORLD BOX
         pygame.draw.rect(self.world_surface, BORDER, (0, 0, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT), 1)

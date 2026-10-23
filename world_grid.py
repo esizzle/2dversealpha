@@ -397,6 +397,12 @@ class World:
         gcy = int(y // CELL_SIZE)
         return gcx, gcy
 
+    def grid_cell_to_world(self, grid_pos):
+        """Inverse of world_to_grid_cell: the world-space CENTRE of grid
+        cell (gx, gy). world_to_grid_cell(grid_cell_to_world(g)) == g."""
+        gx, gy = grid_pos
+        return (gx + 0.5) * CELL_SIZE, (gy + 0.5) * CELL_SIZE
+
     def get_lvl1_chunk_local_cell(self, cell_position):
         gx, gy = cell_position
         if gx < 0 or gy < 0:
