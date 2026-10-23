@@ -18,7 +18,7 @@ import os
 import sys
 
 APP_NAME = "2dverse"
-APP_VERSION = "Alpha 0.0.1"
+APP_VERSION = "Alpha 0.0.2"
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 

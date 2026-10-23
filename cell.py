@@ -203,14 +203,12 @@ class Genome:
 
         # mutate intelligence attractions
         if cell.amt_type0_particles > 0:
-            for _ in range(cell.amt_type0_particles):
-                if random.random() < self.mutation_rate:
-                    pass
-                    #self.intelligence_matrix["p0"] += 0.01
+            if random.random() < self.mutation_rate:
+                self.intelligence_matrix["p0"] += 0.01
         if cell.amt_type1_particles  > 0:
             for _ in range(cell.amt_type1_particles):
-                # if random.random() < self.mutation_rate:
-                #     self.intelligence_matrix["p0"] -= 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["p0"] -= 0.1
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["p1"] += 0.1
                 if random.random() < self.mutation_rate:
@@ -221,8 +219,8 @@ class Genome:
                     self.intelligence_matrix["bepc"] -= 0.1
         if cell.amt_type2_particles > 0:
             for _ in range(cell.amt_type2_particles):
-                # if random.random() < self.mutation_rate:
-                #     self.intelligence_matrix["p0"] -= 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["p0"] -= 0.1
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["p1"] -= 0.1
                 if random.random() < self.mutation_rate:
@@ -233,8 +231,8 @@ class Genome:
                     self.intelligence_matrix["bepc"] += 0.1
         if cell.amt_type3_particles > 0:
             for _ in range(cell.amt_type3_particles):
-                # if random.random() < self.mutation_rate:
-                #     self.intelligence_matrix["p0"] -= 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["p0"] -= 0.1
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["p3"] += 0.1
                 if random.random() < self.mutation_rate:
@@ -243,7 +241,10 @@ class Genome:
                     self.intelligence_matrix["spc"] -= 0.1
 
         for key, value in self.intelligence_matrix.items():
-            self.intelligence_matrix[key] = max(-1.0, min(1.0, value))
+            if key == "p0":
+                self.intelligence_matrix[key] = max(0.0, min(1.0, value))
+            else:
+                self.intelligence_matrix[key] = max(-1.0, min(1.0, value))
 
         # multicellularity
         if len(cell.nearby_entities) > 3:
