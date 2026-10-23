@@ -200,6 +200,11 @@ class Game:
         # until held for DRAG_HOLD_MS (see update_drag_hold).
         self.drag = None
 
+        # player zoom: a multiplier on the cell-size zoom limit (see update);
+        # last_set_zoom lets update tell scroll-wheel changes apart from its own
+        self.zoom_factor = 1.0
+        self.last_set_zoom = None
+
         # initial chunk (and hitbox) load around the player
         pos = self.world.world_to_lvl1_chunk(self.player.cell.body.position)
         self.world.load_chunks(pos, self.space)
@@ -1201,16 +1206,36 @@ class Game:
                     self.player.cell = cell
                     self.world.process(cell.body.position, self.space)
 
+                    # zoom limit: the furthest OUT the player can zoom. It
+                    # shrinks as the cell / organism grows, like before.
                     if cell.multicellular and cell.multicell is not None:
                         size = 0
                         i = 0
                         for unit in cell.multicell.cells:
                             size += ((unit.size-i)**2)
                             i += 1
-                        target_zoom = max(20/(math.sqrt(size)), 0.5)
+                        zoom_limit = max(20/(math.sqrt(size)), 0.5)
 
                     else:
-                        target_zoom = 20/cell.size
+                        zoom_limit = 20/cell.size
+
+                    # the player's own zoom is kept as a multiplier on the
+                    # limit (1.0 = at the limit, 2.0 = twice as close), so
+                    # when the cell grows the view still zooms out with it.
+                    # Any change since we last set camera.zoom came from the
+                    # scroll wheel (Camera.handle_input): fold it into the
+                    # multiplier. Never below 1.0 = never further out than
+                    # the limit.
+                    if self.last_set_zoom:
+                        # scrolling can't take the view further out than the
+                        # limit (or than where it already was, while it is
+                        # still easing in after the cell shrank) -- a hard
+                        # stop, so there is no overshoot and snap-back
+                        floor = min(self.last_set_zoom, zoom_limit)
+                        self.camera.zoom = max(self.camera.zoom, floor)
+                        self.zoom_factor *= self.camera.zoom / self.last_set_zoom
+                    self.zoom_factor = max(1.0, self.zoom_factor)
+                    target_zoom = zoom_limit * self.zoom_factor
 
                     #Smoothly interpolate toward target zoom
                     smoothing = 0.1
@@ -1218,6 +1243,7 @@ class Game:
                     # Snap to target when sufficiently close
                     if abs(target_zoom - self.camera.zoom) < 0.001:
                         self.camera.zoom = target_zoom
+                    self.last_set_zoom = self.camera.zoom
 
                     self.camera.update(cell.body, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT)
 

@@ -216,7 +216,7 @@ class Genome:
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["sc"] += 0.1
                 if random.random() < self.mutation_rate:
-                    self.intelligence_matrix["bepc"] -= 0.1
+                    self.intelligence_matrix["spc"] -= 0.1
         if cell.amt_type2_particles > 0:
             for _ in range(cell.amt_type2_particles):
                 if random.random() < self.mutation_rate:
@@ -226,7 +226,7 @@ class Genome:
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["p2"] += 0.1
                 if random.random() < self.mutation_rate:
-                    self.intelligence_matrix["sc"] -= 0.1
+                    self.intelligence_matrix["bc"] -= 0.1
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["bepc"] += 0.1
         if cell.amt_type3_particles > 0:
@@ -235,6 +235,7 @@ class Genome:
                     self.intelligence_matrix["p0"] -= 0.1
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["p3"] += 0.1
+                # maybe change to sc and bepc just to get weird behaviours from eating mushrooms (originally bc and spc)
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["bc"] -= 0.1
                 if random.random() < self.mutation_rate:
