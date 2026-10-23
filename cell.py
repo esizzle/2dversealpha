@@ -240,8 +240,9 @@ class Genome:
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["spc"] -= 0.1
 
+        pattract = ["p0", "p1", "p2", "p3"]
         for key, value in self.intelligence_matrix.items():
-            if key == "p0":
+            if key in pattract:
                 self.intelligence_matrix[key] = max(0.0, min(1.0, value))
             else:
                 self.intelligence_matrix[key] = max(-1.0, min(1.0, value))
