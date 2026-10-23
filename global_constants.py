@@ -129,3 +129,14 @@ FOOD_RECHECK_DISTANCE = 2.0
 # ... frame with the chance scaled up to match, so every food region in the
 # world refills at the same average rate.
 PARTICLE_RESPAWN_RATE = 0.05
+
+# ----------------------------------------------------------------------
+# Aging -- see Cell.age
+# ----------------------------------------------------------------------
+# Every cell loses a fixed amount of energy once per AGING_TICK seconds, so a
+# cell starting with CELL_BASE_ENERGY and never eating dies after
+# CELL_LIFESPAN seconds. The drain is constant: it does NOT scale with mass.
+CELL_BASE_ENERGY = 50000
+CELL_LIFESPAN = 30.0         # seconds
+AGING_TICK = 1.0             # seconds between drains
+AGING_DRAIN = CELL_BASE_ENERGY / CELL_LIFESPAN   # ~3333 energy per tick

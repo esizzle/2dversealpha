@@ -357,14 +357,24 @@ class Multicell:
         self.cells = []
         self.head = head
         self.tails = []
-
-        self.is_player = False
         for cell in cells:
             _join_organism(cell, self)
             self.cells.append(cell)
         self.refresh_tails()
 
     # -- queries -------------------------------------------------------
+    @property
+    def is_player(self):
+        """True while one of this organism's cells is the player cell.
+
+        Derived, never stored, so it can't go stale: it follows the player
+        cell through splits (daughter 1 inherits cell.is_player), deaths
+        (Game.give_player_control hands it to the new head) and
+        fragmentation (rebuild -- only the piece that still holds the player
+        cell reads True). Read-only on purpose: it never sets cell.is_player
+        on body cells, which would confuse the camera and input logic."""
+        return any(cell.is_player for cell in self.cells)
+
     def degree(self, cell):
         """Number of links `cell` has to other members of this organism."""
         return sum(1 for n in structural_links(cell) if n.multicell is self)

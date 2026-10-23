@@ -15,19 +15,28 @@ from global_constants import (SHOW_CELL_JOINTS, AI_DECISION_INTERVAL,
                               SIM_LOD, SIM_LOD_FULL_RADIUS, SIM_LOD_MAX_INTERVAL,
                               FOOD_RECHECK_DISTANCE, PARTICLE_RESPAWN_RATE)
 FOOD_RECHECK_DISTANCE_SQ = FOOD_RECHECK_DISTANCE * FOOD_RECHECK_DISTANCE
+from collections import deque
+
 
 SCREEN_WIDTH = 1080
 SCREEN_HEIGHT = 720
 WORLD_WINDOW_WIDTH = 600
 WORLD_WINDOW_HEIGHT = 600
 STAT_BOX_W = 200
-STAT_BOX_H = 300
+STAT_BOX_H = 150
 MUT_BOX_W = 200
 MUT_BOX_H = 200
 SPECIES_BOX_W = 200
 SPECIES_BOX_H = 600
 JOURNAL_BOX_W = 200
 JOURNAL_BOX_H = 600
+INTEL_BOX_W = 200
+INTEL_BOX_H = 220
+
+VEL_BOX_W = 200
+VEL_BOX_H = 220
+VEL_SAMPLES_PER_SEC = 60      # must match dt = 1/60 in update()
+VEL_HISTORY_SECONDS = 10.0    # x-axis span (default)
 
 # Screen-space HUD chrome (fixed to the application window, never the world).
 HUD_PAD = 8              # padding from the screen edges for the FPS counter / tab
@@ -63,6 +72,9 @@ class Game:
         self.stat_box_surface = pygame.Surface((STAT_BOX_W, STAT_BOX_H))
         self.mut_box_surface = pygame.Surface((MUT_BOX_W, MUT_BOX_H))
         self.species_box_surface = pygame.Surface((SPECIES_BOX_W, SPECIES_BOX_H))
+        self.intel_box_surface = pygame.Surface((INTEL_BOX_W, INTEL_BOX_H))
+        self.vel_box_surface = pygame.Surface((VEL_BOX_W, VEL_BOX_H))
+        self.vel_history = deque(maxlen=int(VEL_HISTORY_SECONDS * VEL_SAMPLES_PER_SEC))
 
         # HUD font. This has always rendered with pygame's bundled default
         # font: the old call was SysFont("assets/fonts/Arcade_Classic.ttf")
@@ -167,6 +179,11 @@ class Game:
         self.cells.append(fungi)
         self.previous_cell_length = 3
 
+        # cell picked by clicking in the game world. None = show the player.
+        # The stat box, intelligence matrix and velocity graphs all read
+        # self.inspected_cell, which falls back to the player.
+        self.selected_cell = None
+
         # initial chunk (and hitbox) load around the player
         pos = self.world.world_to_lvl1_chunk(self.player.cell.body.position)
         self.world.load_chunks(pos, self.space)
@@ -254,6 +271,12 @@ class Game:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     jx, jy = self.journal_pos
                     self.journal.handle_click((event.pos[0] - jx, event.pos[1] - jy))
+                # 4. left-click inside the game world selects the cell under
+                #    the cursor (or clears the selection on empty space)
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
+                        and self.world_rect().collidepoint(event.pos):
+                    self.select_cell_at(event.pos)
+                    continue
             world_events.append(event)
 
         # camera inputs
@@ -265,6 +288,62 @@ class Game:
             head = steering_head(cell)
             if cell.is_player or (head is not None and head.is_player):
                 cell.handle_input(world_events, keys)
+
+    # ------------------------------------------------------------------
+    # Cell selection (click a cell to inspect it)
+    # ------------------------------------------------------------------
+    def world_rect(self):
+        """Screen-space rect of the game world viewport."""
+        return pygame.Rect((SCREEN_WIDTH - WORLD_WINDOW_WIDTH) // 2,
+                           (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) // 2,
+                           WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT)
+
+    @property
+    def inspected_cell(self):
+        """The cell the stat panels show: the selected cell, or the player."""
+        cell = self.selected_cell
+        if cell is None or cell.is_dead:
+            return self.player.cell
+        return cell
+
+    def set_selected_cell(self, cell):
+        """Select `cell` (None or the player = back to showing the player).
+        The velocity history restarts, since it belonged to another cell."""
+        if cell is not None and cell.is_player:
+            cell = None
+        if cell is not self.selected_cell:
+            self.selected_cell = cell
+            self.vel_history.clear()
+
+    def select_cell_at(self, screen_pos):
+        """Pick the cell under a screen-space point. A few px of slack so
+        tiny, zoomed-out cells are still clickable."""
+        wr = self.world_rect()
+        wx, wy = self.camera.screen_to_world(screen_pos[0] - wr.x, screen_pos[1] - wr.y)
+        slack = 4 / max(self.camera.zoom, 0.01)
+        best, best_dist = None, float("inf")
+        for info in self.space.point_query((wx, wy), slack, pymunk.ShapeFilter()):
+            cell = getattr(info.shape, "_object", None)
+            if cell is None or cell.is_dead:
+                continue
+            if info.distance < best_dist:
+                best, best_dist = cell, info.distance
+        self.set_selected_cell(best)
+
+    def draw_selection_marker(self, visible):
+        """A gold ring/box just outside the selected cell."""
+        cell = self.selected_cell
+        if cell is None or cell.is_dead or cell not in visible:
+            return
+        zoom = self.camera.zoom
+        ox, oy = self.camera.offset
+        x = cell.body.position[0] * zoom + ox
+        y = cell.body.position[1] * zoom + oy
+        r = cell.size * zoom + 5
+        if cell.has_cell_wall:
+            pygame.draw.rect(self.world_surface, GOLD, (x - r, y - r, r * 2, r * 2), 1)
+        else:
+            pygame.draw.circle(self.world_surface, GOLD, (x, y), r, 1)
 
     def on_cell_begin(self, arbiter, space, data):
         a, b = arbiter.shapes
@@ -436,32 +515,16 @@ class Game:
 
     def draw_stat_box(self):
         self.stat_box_surface.fill(BLACK)
+        cell = self.inspected_cell
 
         # Generation
-        self.draw_stat_text("GENERATION", self.player.cell.generation, 20)
-
-        # Intelligence
-        if self.player.cell.genome.intelligence == -1:
-            intelligence = "None"
-        elif self.player.cell.genome.intelligence == 0:
-            intelligence = "Random"
-        elif self.player.cell.genome.intelligence == 1:
-            intelligence = "Terrain Aware"
-        elif self.player.cell.genome.intelligence == 2:
-            intelligence = "Nutrient Aware"
-        elif self.player.cell.genome.intelligence == 3:
-            intelligence = "Cell Aware"
-        elif self.player.cell.genome.intelligence == 4:
-            intelligence = "Cell Type Aware"
-        else:
-            intelligence = "Undefined"
-        self.draw_stat_text("INTELLIGENCE", intelligence, 45)
+        self.draw_stat_text("GENERATION", cell.generation, 20)
 
         # Mass
-        self.draw_stat_bar(self.player.cell.mass, self.player.cell.max_mass, "MASS", "pg", 75)
+        self.draw_stat_bar(cell.mass, cell.max_mass, "MASS", "pg", 55)
 
         # Energy
-        self.draw_stat_bar(self.player.cell.energy, self.player.cell.max_energy, "ENERGY", "nJ", 110, 1000)
+        self.draw_stat_bar(cell.energy, cell.max_energy, "ENERGY", "nJ", 100, 1000)
 
         # OUTLINE
         pygame.draw.rect(self.stat_box_surface, BORDER, (0, 0, STAT_BOX_W, STAT_BOX_H), 1)
@@ -493,12 +556,114 @@ class Game:
         self.screen.blit(self.mut_box_surface, ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH) // 2 + 20,
                                                 (SCREEN_HEIGHT // 2) + 20))
 
+    def set_vel_history(self, seconds):
+        """Change the time window. Keeps the most recent samples."""
+        self.vel_history = deque(self.vel_history,
+                                 maxlen=max(2, int(seconds * VEL_SAMPLES_PER_SEC)))
+
+    def _draw_vel_plot(self, surf, name, axis, top, height, max_speed):
+        grey, dark = (100, 100, 100), (50, 50, 50)
+        left, right = 10, VEL_BOX_W - 10
+        hist = self.vel_history
+        current = hist[-1][axis] if hist else 0.0
+        secs = hist.maxlen / VEL_SAMPLES_PER_SEC
+
+        title = self.font.render(f"{name}: {current:+.1f}", True, (255, 255, 255))
+        surf.blit(title, (left, top))
+        scale = self.font.render(f"{secs:.0f}s  ±{max_speed:.0f}", True, grey)
+        surf.blit(scale, scale.get_rect(topright=(right, top)))
+
+        plot_top = top + 16
+        plot_bot = top + height - 6
+        mid = (plot_top + plot_bot) // 2
+        half = (plot_bot - plot_top) / 2
+
+        # +max / -max guides and the zero axis
+        pygame.draw.line(surf, dark, (left, plot_top), (right, plot_top))
+        pygame.draw.line(surf, dark, (left, plot_bot), (right, plot_bot))
+        pygame.draw.line(surf, grey, (left, mid), (right, mid))
+
+        n = len(hist)
+        if n < 2:
+            return
+        # newest sample pinned to the right edge; until the buffer fills,
+        # the trace grows in from the right
+        step = (right - left) / (hist.maxlen - 1)
+        x0 = right - (n - 1) * step
+        k = half / max_speed
+        pts = [(x0 + i * step, mid - max(-max_speed, min(max_speed, s[axis])) * k)
+               for i, s in enumerate(hist)]
+        pygame.draw.aalines(surf, (0, 255, 0), False, pts)
+
+    def draw_vel_box(self, pos):
+        surf = self.vel_box_surface
+        surf.fill(BLACK)
+        pygame.draw.rect(surf, BORDER, (0, 0, VEL_BOX_W, VEL_BOX_H), 1)
+
+        max_speed = max(1, self.inspected_cell.genome.speed_range[1])
+        plot_h = (VEL_BOX_H - 8) // 2
+        self._draw_vel_plot(surf, "VX", 0, 6, plot_h, max_speed)
+        self._draw_vel_plot(surf, "VY", 1, 6 + plot_h, plot_h, max_speed)
+
+        self.screen.blit(surf, pos)
+
     def draw_species_box(self):
         self.species_box_surface.fill(BLACK)
         pygame.draw.rect(self.species_box_surface, (255, 255, 255), (0, 0, SPECIES_BOX_W, SPECIES_BOX_H), 1)
 
         self.screen.blit(self.species_box_surface, ((SCREEN_WIDTH - WORLD_WINDOW_WIDTH) // 2 - 220,
                                                     (SCREEN_HEIGHT - WORLD_WINDOW_HEIGHT) // 2))
+
+    def draw_intel_box(self):
+        surf = self.intel_box_surface
+        surf.fill(BLACK)
+        pygame.draw.rect(surf, BORDER, (0, 0, INTEL_BOX_W, INTEL_BOX_H), 1)
+
+        matrix = self.inspected_cell.genome.intelligence_matrix
+        grey = (100, 100, 100)
+
+        # number line geometry: labels live left of line_left
+        line_left = 55
+        line_right = INTEL_BOX_W - 15
+        line_w = line_right - line_left
+        mid = line_left + line_w // 2
+
+        def to_x(v):
+            v = max(-1.0, min(1.0, v))
+            return int(line_left + (v + 1) / 2 * line_w)
+
+        # scale header: -1   0   +1
+        for txt, x in (("-1", line_left), ("0", mid), ("+1", line_right)):
+            t = self.font.render(txt, True, grey)
+            surf.blit(t, t.get_rect(midtop=(x, 15)))
+
+        top, row_h = 35, 23
+        for i, (key, value) in enumerate(matrix.items()):
+            y = top + i * row_h
+
+            label = self.font.render(key.upper(), True, (255, 255, 255))
+            surf.blit(label, label.get_rect(midleft=(10, y)))
+
+            # axis + ticks at -1, 0, +1
+            pygame.draw.line(surf, grey, (line_left, y), (line_right, y), 1)
+            for x in (line_left, mid, line_right):
+                pygame.draw.line(surf, grey, (x, y - 4), (x, y + 4), 1)
+
+            if value > 0:
+                color = (0, 255, 0)  # attraction
+            elif value < 0:
+                color = (255, 0, 0)  # avoidance
+            else:
+                color = grey  # ignored
+
+            x = to_x(value)
+            if value:
+                # bar from 0 out to the value so magnitude reads at a glance
+                pygame.draw.line(surf, color, (mid, y), (x, y), 3)
+            pygame.draw.circle(surf, color, (x, y), 4)
+
+        self.screen.blit(surf, ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH) // 2 + 20,
+                                (SCREEN_HEIGHT // 2) - 135))
 
     def draw_journal(self):
         # journal owns its surface + layout; we just blit it into the left slot
@@ -556,6 +721,8 @@ class Game:
 
             if SHOW_CELL_JOINTS:
                 self.draw_joints(visible)
+
+            self.draw_selection_marker(visible)
 
         # WORLD BOX
         pygame.draw.rect(self.world_surface, BORDER, (0, 0, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT), 1)
@@ -621,12 +788,26 @@ class Game:
                 self.draw_settings_panel()
             else:
                 self.draw_stat_box()
-            self.draw_mut_box()
+            #self.draw_mut_box()
+            self.draw_intel_box()
+            self.create_box_label("Intelligence Matrix",
+                                  ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + INTEL_BOX_W) // 2 - 35,
+                                   SCREEN_HEIGHT // 2 - 140))
+            self.draw_vel_box(((SCREEN_WIDTH + WORLD_WINDOW_WIDTH) // 2 + 20, SCREEN_HEIGHT // 2 + 100))
+            self.create_box_label("Cell Velocity",
+                                  ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + INTEL_BOX_W) // 2 - 15,
+                                   SCREEN_HEIGHT // 2 + 95))
             self.draw_journal()
             self.create_box_label("Game World", (SCREEN_WIDTH / 2 - 16, 55))
-            self.create_box_label("Settings" if self.settings.is_open else "Player Stats", slot_label_pos,
+            if self.settings.is_open:
+                slot_label = "Settings"
+            elif self.selected_cell is not None and not self.selected_cell.is_dead:
+                slot_label = "Cell Stats"
+            else:
+                slot_label = "Player Stats"
+            self.create_box_label(slot_label, slot_label_pos,
                                   clear_width=self.font.size("Player Stats")[0])
-            self.create_box_label("Mutations", ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + STAT_BOX_W) // 2 - 10, 375))
+            #self.create_box_label("Mutations", ((SCREEN_WIDTH + WORLD_WINDOW_WIDTH + STAT_BOX_W) // 2 - 10, 375))
             self.create_box_label("Mutation Journal", (self.journal_pos[0] + 50, 55))
             self.draw_hud_chrome()
 
@@ -646,6 +827,10 @@ class Game:
         (Cell.split handed its slot to its daughters), so its removal here
         never fragments or re-heads an organism -- only actual deaths do."""
         organism = cell.multicell
+
+        # the inspected cell died: go back to showing the player
+        if cell is self.selected_cell:
+            self.set_selected_cell(None)
 
         # spawn particles for mass
         if cell.is_player:
@@ -756,6 +941,8 @@ class Game:
 
     def update(self):
         dt = 1 / 60
+        v = self.inspected_cell.body.velocity
+        self.vel_history.append((v.x, -v.y))
 
         # simulated time, advanced by the same fixed dt as the physics step.
         # Cell.invulnerable_until is stamped against this clock.
@@ -763,7 +950,7 @@ class Game:
         self.frame += 1
 
         # too slow? thin the population by one random non-player cell
-        self.cull_for_fps()
+        #self.cull_for_fps()
 
         with self.profiler.section("physics"):
             # refresh the audio listener BEFORE physics so the sand-collision
@@ -811,20 +998,40 @@ class Game:
                         cell._env_grid_pos = cell.last_grid_pos
                     env = cell._env
 
-                # player cell functions
+                # player funcs
                 if cell.is_player:
                     self.player.cell = cell
                     self.world.process(cell.body.position, self.space)
+
+                    if cell.multicellular and cell.multicell is not None:
+                        size = 0
+                        i = 0
+                        for unit in cell.multicell.cells:
+                            size += ((unit.size-i)**2)
+                            i += 1
+                        target_zoom = max(20/(math.sqrt(size)), 0.5)
+
+                    else:
+                        target_zoom = 20/cell.size
+
+                    #Smoothly interpolate toward target zoom
+                    smoothing = 0.1
+                    self.camera.zoom += (target_zoom - self.camera.zoom) * smoothing
+                    # Snap to target when sufficiently close
+                    if abs(target_zoom - self.camera.zoom) < 0.001:
+                        self.camera.zoom = target_zoom
+
                     self.camera.update(cell.body, WORLD_WINDOW_WIDTH, WORLD_WINDOW_HEIGHT)
+
                 elif not cell.is_splitting and not cell.has_cell_wall:
                     head = steering_head(cell)
-                    if head is None and cell.genome.intelligence >= 0:
+                    if head is None:
                         # AI re-decides every AI_DECISION_INTERVAL frames,
                         # staggered across cells; in between it keeps moving
                         # along its last chosen direction
                         if (cell.ai_direction is None or steps >= AI_DECISION_INTERVAL
                                 or (self.frame + cell.update_phase) % AI_DECISION_INTERVAL == 0):
-                            cell.ai_direction = cell.decision_model.decide(cell, self.world)
+                            cell.ai_direction = cell.decide()
                         cell.apply_movement(cell.ai_direction, steps)
                     elif (head is not None and not head.is_player
                           and head.ai_direction is not None):
@@ -842,6 +1049,10 @@ class Game:
                 # cell reproduction (children spawn into new_cells)
                 if will_split:
                     cell.split(self.space, new_cells, env, self.world)
+                    # a selected cell that divides: follow daughter 1 (the
+                    # same lineage rule the player follows); keep its graph
+                    if cell is self.selected_cell and cell.has_split:
+                        self.selected_cell = new_cells[-2]
 
                 # gain energy: eat nearby particles. Food nearby changed ->
                 # rebuild the list from the grid. Walled cells (plants, fungi)
@@ -871,8 +1082,14 @@ class Game:
 
                 # gain energy: decomposition
                 if cell.is_fungi and env is not None and env.chunk_material == MATERIAL_SAND and env.has_particles:
-                    if cell.mass < cell.max_mass:
-                        cell.mass += 1 * steps
+                    cell.add_energy(100*steps)
+
+                # aging: fixed energy drain every second, independent of mass
+                cell.age(cdt)
+
+                # death by starvation
+                if cell.energy <= 0:
+                    cell.is_dead = True
 
                 # death by starvation
                 if cell.energy <= 0:

@@ -736,7 +736,7 @@ class Level1Chunk:
 
         chunk_pixel_size = LVL1_CHUNK_SIZE * CELL_SIZE * zoom
 
-        if 0.10 < zoom < 0.5:
+        if 0.10 < zoom <= 0.5:
             pygame.draw.rect(
                 surface,
                 self.material_color,
@@ -749,7 +749,7 @@ class Level1Chunk:
                 1
             )
 
-        if zoom > 0.50:
+        if zoom > 0.5:
             for bx in range(LVL1_CHUNK_SIZE):
                 for by in range(LVL1_CHUNK_SIZE):
                     material = self.materials.get((bx, by))

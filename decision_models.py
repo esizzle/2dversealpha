@@ -6,11 +6,17 @@ direction*; the organism itself decides how to act on it (Cell.apply_movement).
 
 Design contract
 ---------------
-* decide() returns a desired direction as a (roughly unit) Vec2d -- never a
-  velocity, force, or energy change. A model never reads or writes body.velocity,
+* decide() returns a desired direction as a Vec2d of length 0..1 -- never a
+  velocity, force, or energy change. Its direction is where the organism wants
+  to go; its length is how strongly (1 = full thrust). Cell.apply_movement
+  already scales the push by it. A model never reads or writes body.velocity,
   energy, mass, etc. This keeps "what do I want to do" fully separate from
   "how does my body do it", which is the whole point of the split.
 * Vec2d.zero() means "no preference this frame" (coast / stay put).
+* Drives that pull in opposite directions must be allowed to cancel into a
+  SHORT vector. Never re-normalise a near-zero sum: that turns leftover noise
+  into full thrust in a random direction, and the cell jitters in place
+  ("decision paralysis" -- see claude/decision-paralysis-diagnosis.md).
 * Any per-organism perception a model wants to remember (memory, smell trails,
   last-seen prey, ...) lives on the *model instance*, not on the Cell, so each
   capability stays self-contained.
@@ -41,8 +47,18 @@ def _random_unit():
     return Vec2d(math.cos(a), math.sin(a))
 
 
-def _safe_normalize(vec):
+def   _safe_normalize(vec):
     return vec.normalized() if vec.length > 1e-9 else Vec2d.zero()
+
+
+def _clamp_length(vec, max_length=1.0):
+    """Cap a vector's length at max_length WITHOUT stretching short ones. Use
+    this, not _safe_normalize, wherever drives are combined, so drives that
+    cancel out give a weak push instead of a random full-strength one."""
+    length = vec.length
+    if length > max_length:
+        return vec * (max_length / length)
+    return vec
 
 
 def _neighbor_terrain(organism, world):
@@ -99,23 +115,33 @@ def _particle_steer(organism, world):
 def _perceived_cells(organism):
     """Other organisms this organism can currently perceive. Populated by
     World.update_entity into organism.nearby_entities (refreshed on grid-cell
-    change), so this is cheap and slightly stale -- fine for v1."""
+    change), so this is cheap and slightly stale -- fine for v1.
+
+    Cells of the organism's OWN animal body (same Multicell, see multicell.py)
+    are left out: they are part of "me", not neighbours. Without this a head
+    spends most of its attention on its own body -- pulled back into its tail
+    (positive attraction) or shoved forward into terrain (negative)."""
+    own = getattr(organism, "multicell", None)
     return [c for c in organism.nearby_entities
-            if c is not organism and not c.is_dead]
+            if c is not organism and not c.is_dead
+            and (own is None or getattr(c, "multicell", None) is not own)]
 
 
 def _weighted_social(organism, others, weight_fn):
-    """Sum of (unit direction to each other) * weight_fn(other), normalized.
+    """Sum of (unit direction to each other) * weight_fn(other), capped at
+    length 1.
 
-    Each contribution is a *unit* vector, so distance doesn't distort the sign --
-    attraction strength is purely genomic. A negative weight flips a contribution
-    from attraction into avoidance. Empty / all-zero -> Vec2d.zero().
+    Each contribution is a *unit* direction, so distance doesn't distort the
+    sign; the weight (the gene) sets how strongly it pulls. A negative weight
+    flips a contribution from attraction into avoidance. The sum is capped,
+    not normalised, so a weak gene (e.g. +0.1) gives a weak social drive
+    instead of a full-strength one. Empty / all-zero -> Vec2d.zero().
     """
     here = organism.body.position
     accum = Vec2d.zero()
     for other in others:
         accum += _safe_normalize(other.body.position - here) * weight_fn(other)
-    return _safe_normalize(accum)
+    return _clamp_length(accum)
 
 
 # ----------------------------------------------------------------------
@@ -155,8 +181,8 @@ class DecisionModel:
     name = "base"  # handy label for a mutation / debug overlay
 
     def decide(self, organism, world):
-        """Return a desired unit direction (Vec2d); Vec2d.zero() == no preference.
-        Must not mutate the organism's physical state."""
+        """Return a desired direction (Vec2d, length 0..1); Vec2d.zero() == no
+        preference. Must not mutate the organism's physical state."""
         raise NotImplementedError
 
     def seed_heading(self, direction):
@@ -177,8 +203,7 @@ class RandomDecisionModel(DecisionModel):
         self._heading = _random_unit()
 
     def decide(self, organism, world):
-        if random.random() < 0.01:  # repick occasionally -> wander, not jitter
-            self._heading = _random_unit()
+        self._heading = _random_unit()
         return self._heading
 
     def seed_heading(self, direction):
@@ -210,24 +235,14 @@ class NutrientDecisionModel(RandomDecisionModel):
         super().__init__()
 
     def decide(self, organism, world):
-        base = super().decide(organism, world)  # terrain/wander
+        base = super().decide(organism, world)  # wander (no terrain sensing yet)
         p_steer = _particle_steer(organism, world)
-        return _safe_normalize(base + p_steer)
+        return _safe_normalize(base + p_steer * 0.5)
 
 class CellAwareDecisionModel(NutrientDecisionModel):
-    """Cell-aware tier (reached via 3A/3B) -- everything Terrain does, PLUS it
-    perceives nearby organisms and acts on the cell-wall distinction: it is
-    drawn toward plant cells (walled) and keeps personal space from other
-    animal cells (unwalled), via _feeding_steer. Higher levels then add their
-    genome-driven social layer on top of this.
-
-    NOTE (behavioural change): this model used to be awareness-only ("perceives
-    but does not act"). It now contributes feeding/spacing steering. Because
-    AttractionDecisionModel (3A) and SizeAwareDecisionModel (3B) call
-    super().decide(), they inherit that steering too -- *combined with*, not
-    replacing, their existing cell_attraction / size genes. If you want to keep
-    3A/3B untouched, move the two feeding lines below into a dedicated sibling
-    model and give it its own intelligence level in the factory instead.
+    """Cell-aware tier (reached via 3A/3B) -- everything Nutrient does, PLUS it
+    perceives nearby organisms (excluding its own animal body). Higher levels
+    add their genome-driven social layer on top of this.
     """
     name = "cell_aware"
 
@@ -238,7 +253,7 @@ class CellAwareDecisionModel(NutrientDecisionModel):
 
     def decide(self, organism, world):
         self.perceived = _perceived_cells(organism)
-        base = super().decide(organism, world)           # terrain / wander
+        base = super().decide(organism, world)           # wander + food
         final = _safe_normalize(base)
 
         if DEBUG_SOCIAL_STEERING:
@@ -254,15 +269,16 @@ class CellAwareDecisionModel(NutrientDecisionModel):
 
 class AttractionDecisionModel(CellAwareDecisionModel):
     """Level 3A -- a single genome.cell_attraction in [-1, 1] blends steering
-    toward (+) or away from (-) the perceived organisms, on top of terrain
-    (and, now, the cell-wall feeding/spacing steer from CellAwareDecisionModel)."""
+    toward (+) or away from (-) the perceived organisms, on top of the food /
+    wander drive. The gene's size is its strength: food and social pulls that
+    disagree cancel into a weak push rather than a random full-strength one."""
     name = "attraction"
 
     def decide(self, organism, world):
-        base = super().decide(organism, world)  # terrain/wander + feeding + perceived
+        base = super().decide(organism, world)  # wander + food, unit length
         a = organism.genome.cell_attraction
         social = _weighted_social(organism, self.perceived, lambda other: a)
-        return _safe_normalize(base + social)
+        return _clamp_length(base + social)
 
 class TypeAwareDecisionModel(AttractionDecisionModel):
     name = "type_aware"
@@ -278,7 +294,7 @@ class TypeAwareDecisionModel(AttractionDecisionModel):
         social = _weighted_social(organism, self.perceived,
                                   lambda other: weight if other.has_cell_wall else 0.0)
 
-        return _safe_normalize(base + social)
+        return _clamp_length(base + social)
 
 
 
@@ -293,7 +309,7 @@ class SizeAwareDecisionModel(CellAwareDecisionModel):
     name = "size_aware"
 
     def decide(self, organism, world):
-        base = super().decide(organism, world)  # terrain/wander + feeding + perceived
+        base = super().decide(organism, world)  # wander + food
         g = organism.genome
 
         def weight(other):
@@ -302,7 +318,7 @@ class SizeAwareDecisionModel(CellAwareDecisionModel):
             return g.larger_cell_attraction
 
         social = _weighted_social(organism, self.perceived, weight)
-        return _safe_normalize(base + social)
+        return _clamp_length(base + social)
 
 
 # ----------------------------------------------------------------------

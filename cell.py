@@ -5,6 +5,8 @@ import pygame
 import math
 import random
 
+from pymunk import Vec2d
+
 from colors import BLACK, LIME, ORANGE, RED, FUNGI
 from env_features import EnvFeatures
 from physics_object import *
@@ -15,18 +17,7 @@ from multicell import (begin_multicellular_split, finish_multicellular_split,
                        animal_growth_direction, adopt_daughters, same_organism)
 from audio import audio
 from sim_clock import sim_clock
-from global_constants import (
-    SPLIT_SPEED,
-    SPLIT_DRIFT_SPEED,
-    SPLIT_SEPARATION_MARGIN,
-    SPLIT_MIN_PARENT_SPEED,
-    SPLIT_STALL_TIME,
-    SPLIT_MAX_DURATION,
-    POST_SPLIT_INVULNERABILITY,
-    SHOW_INVULNERABILITY_RING,
-    SPLIT_MERGE_OUTLINES,
-    CELL_OUTLINE_WIDTH,
-)
+from global_constants import *
 
 # Cell life-cycle states:  normal -> splitting -> normal (+ invulnerability)
 # A freshly split daughter is "splitting" until it no longer overlaps its
@@ -73,6 +64,7 @@ class Genome:
         self.intelligence_range = [-1, 4]  # 3 == Level 3A, 4 == Level 3B
 
         # social genes (only consulted once the matching model is unlocked)
+        self.intelligence_matrix = {"p0": 0.0, "p1": 0.0, "p2": 0.0, "p3" : 0.0, "sc": 0.0, "bc": 0.0, "spc": 0.0, "bepc": 0.0 }
         self.cell_attraction = 0.0  # 3A: single toward/away, [-1, 1]
         self.smaller_cell_attraction = 0.0  # 3B: response to smaller cells
         self.larger_cell_attraction = 0.0  # 3B: response to larger cells
@@ -125,10 +117,10 @@ class Genome:
         for _ in range(cell.amt_type1_particles):
             if random.random() < self.mutation_rate:
                 self.max_speed = min(self.max_speed + 5, self.speed_range[1])
-            if random.random() < self.mutation_rate and env.chunk_material != 2:
-                self.max_mass += random.choice([2, 4, 6, 8])
-                self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
-                self.size = self.max_mass // 2
+            # if random.random() < self.mutation_rate and env.chunk_material != 2:
+            #     self.max_mass += random.choice([2, 4, 6, 8])
+            #     self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
+            #     self.size = self.max_mass // 2
 
         for _ in range(cell.amt_type2_particles):
             if random.random() < self.mutation_rate:
@@ -137,10 +129,6 @@ class Genome:
                 self.max_mass -= random.choice([2, 4, 6, 8])
                 self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
                 self.size = self.max_mass // 2
-
-        for _ in range(cell.amt_type3_particles):
-            if random.random() < 2*self.mutation_rate:
-                self.multicellular = True
 
         self.acceleration = self.max_speed
 
@@ -172,58 +160,49 @@ class Genome:
                 if random.random() < self.mutation_rate:
                     self.color = RED
 
-        # mutate intelligence: perception is costly, so it only pays off -- and
-        # only evolves -- where food is scarce. Rich water keeps cells at Level 0.
-        # level 0 intelligence: if in water and high nutrients --> level 0 intelligence (random movement)
-        if not self.has_cell_wall:
-            if env.chunk_material == 2 and env.has_particles:
-                # decrease chance of first form of intelligence evolving
+        # mutate intelligence attractions
+        if cell.amt_type0_particles > 0:
+            for _ in range(cell.amt_type0_particles):
                 if random.random() < self.mutation_rate:
-                    self.intelligence = max(0, self.intelligence)
-            if env.chunk_material == 2 and env.has_particles:
+                    pass
+                    #self.intelligence_matrix["p0"] += 0.01
+        if cell.amt_type1_particles  > 0:
+            for _ in range(cell.amt_type1_particles):
+                # if random.random() < self.mutation_rate:
+                #     self.intelligence_matrix["p0"] -= 0.1
                 if random.random() < self.mutation_rate:
-                    self.intelligence = max(1, self.intelligence)
-
-            if self.intelligence >= 1:
+                    self.intelligence_matrix["p1"] += 0.1
                 if random.random() < self.mutation_rate:
-                    self.terrain_avoidance += random.uniform(-0.5,0.5)
-
-            # level 2 intelligence: nutrient awareness
-            if not env.has_particles:
+                    self.intelligence_matrix["p2"] -= 0.1
                 if random.random() < self.mutation_rate:
-                    self.intelligence = max(2, self.intelligence)
-
-            # level 3 intelligence: cell awareness
-            if cell.amt_type1_particles > 0:
+                    self.intelligence_matrix["sc"] += 0.1
                 if random.random() < self.mutation_rate:
-                    self.intelligence = max(3, self.intelligence)
-
-            if self.intelligence == 3:
-                choice = random.uniform(0.1, 0.2)
-                if cell.amt_type1_particles > 0:
-                    for i in range(cell.amt_type1_particles):
-                        if random.random() < self.mutation_rate:
-                            self.cell_attraction = min(self.cell_attraction + choice, 1)
-                else:
-                    if random.random() < self.mutation_rate:
-                        self.cell_attraction = max(-1, self.cell_attraction - choice)
-
-            # level 4 intelligence: type awareness
-            if cell.amt_type2_particles > 0:
+                    self.intelligence_matrix["bepc"] -= 0.1
+        if cell.amt_type2_particles > 0:
+            for _ in range(cell.amt_type2_particles):
+                # if random.random() < self.mutation_rate:
+                #     self.intelligence_matrix["p0"] -= 0.1
                 if random.random() < self.mutation_rate:
-                    self.intelligence = max(4, self.intelligence)
+                    self.intelligence_matrix["p1"] -= 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["p2"] += 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["sc"] -= 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["bepc"] += 0.1
+        if cell.amt_type3_particles > 0:
+            for _ in range(cell.amt_type3_particles):
+                # if random.random() < self.mutation_rate:
+                #     self.intelligence_matrix["p0"] -= 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["p3"] += 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["bc"] -= 0.1
+                if random.random() < self.mutation_rate:
+                    self.intelligence_matrix["spc"] -= 0.1
 
-            if self.intelligence == 4:
-                choice = random.uniform(0.1, 0.2)
-                if cell.amt_type2_particles > 0:
-                    for i in range(cell.amt_type2_particles):
-                        if random.random() < self.mutation_rate:
-                            self.wall_cell_attraction = min(self.wall_cell_attraction + choice, 1)
-
-                else:
-                    if random.random()< self.mutation_rate:
-                        self.wall_cell_attraction = max(-1, self.wall_cell_attraction - choice)
-
+        for key, value in self.intelligence_matrix.items():
+            self.intelligence_matrix[key] = max(-1.0, min(1.0, value))
 
         # multicellularity
         if len(cell.nearby_entities) > 3:
@@ -231,28 +210,9 @@ class Genome:
                 if random.random() < self.mutation_rate:
                     self.multicellular = True
 
-
-
-
-        # if not env.has_particles:
-        #     if random.random() < self.mutation_rate:
-        #         self.intelligence = min(self.intelligence + 1, self.intelligence_range[1])
-        # elif random.random() < self.mutation_rate * 0.5:
-        #     self.intelligence = max(self.intelligence - 1, self.intelligence_range[0])
-        #
-        # # drift the social genes so 3A/3B behaviours can emerge once unlocked
-        # if random.random() < self.mutation_rate:
-        #     self.cell_attraction = max(-1.0, min(self.cell_attraction + random.uniform(-0.3, 0.3), 1.0))
-        # if random.random() < self.mutation_rate:
-        #     self.smaller_cell_attraction = max(-1.0,
-        #                                        min(self.smaller_cell_attraction + random.uniform(-0.3, 0.3),
-        #                                            1.0))
-        # if random.random() < self.mutation_rate:
-        #     self.larger_cell_attraction = max(-1.0,
-        #                                       min(self.larger_cell_attraction + random.uniform(-0.3, 0.3), 1.0))
-
-        # Behavioral Mutation: Sticky Cell: Lock onto cell if you try to eat it.
-
+        for _ in range(cell.amt_type3_particles):
+            if random.random() < 2*self.mutation_rate:
+                self.multicellular = True
 
 class Cell:
     def __init__(self, position: tuple, genome: Genome, is_player=False):
@@ -291,6 +251,7 @@ class Cell:
         self.nearby_entities = []
         self.food_changed = False     # set by World.mark_food_changed
         self.food_check_pos = None    # where food was last checked (None = check now)
+        self.amt_type0_particles = 0
         self.amt_type1_particles = 0
         self.amt_type2_particles = 0
         self.amt_type3_particles = 0
@@ -316,6 +277,7 @@ class Cell:
         self._env = None
         self._env_grid_pos = None
         self.ai_direction = None          # last decision-model output (see main.py)
+        self.ai_target = None
         # random offset that staggers AI re-decisions and distance-based
         # (level of detail) updates across cells, so they don't all land on
         # the same frame
@@ -348,6 +310,8 @@ class Cell:
 
         # sim_clock time until which other organisms can't hurt this cell
         self.invulnerable_until = 0.0
+        # aging timer: seconds since the last aging drain (see age)
+        self.aging_timer = 0.0
 
     # ------------------------------------------------------------------
     # Energy
@@ -358,8 +322,18 @@ class Cell:
         against <= 0 in the game loop)."""
         self.energy = min(self.energy + amount, self.max_energy)
 
+    def age(self, dt):
+        """Aging: subtract a fixed AGING_DRAIN once every AGING_TICK seconds.
+        dt is this cell's update step (larger for far-away cells), so the
+        timer keeps real pace at any update rate. Fixed amount: mass, size
+        and genome don't change it."""
+        self.aging_timer += dt
+        while self.aging_timer >= AGING_TICK:
+            self.aging_timer -= AGING_TICK
+            self.add_energy(-AGING_DRAIN)
+
     def _movement_cost(self):
-        return (self.mass * self.acceleration * self.efficiency_factor + self.genome.intelligence*100) * 1/60
+        return (self.mass * self.acceleration * self.efficiency_factor) * 1/60
 
     # ------------------------------------------------------------------
     # Input
@@ -408,27 +382,113 @@ class Cell:
                 self.add_energy(-self._movement_cost())
                 self.has_moved = True
 
+
         # (the K "kill my cell" debug key was removed for the alpha release)
+        if keys[pygame.K_k]:
+            self.is_dead = True
+    def dist_sq(self, obj):
+        pos = self.body.position
+        if isinstance(obj, Particle):
+            dx = obj.x - pos.x
+            dy = obj.y - pos.y
+        elif isinstance(obj , Cell):
+            dx = obj.body.position.x - pos.x
+            dy = obj.body.position.y - pos.y
+        else:
+            dx = float("inf")
+            dy = float("inf")
+        return dx * dx + dy * dy
+
+    # --- intelligence-matrix decision model -------------------------------
+    _SWITCH_MARGIN = 1.25  # a new target must score 25% better to steal focus
+    _ARRIVE_RADIUS = 2.0  # x own size: start easing off inside this
+
+    def _gene_for(self, obj):
+        """Which intelligence_matrix gene applies to this object, or None."""
+        m = self.genome.intelligence_matrix
+        if isinstance(obj, Particle):
+            return m.get(f"p{obj.type}")
+        if obj is self or obj.is_dead or same_organism(self, obj):
+            return None
+        if obj.has_cell_wall:
+            return m["spc"] if obj.size < self.size else m["bepc"]
+        if obj.size < self.size:
+            return m["sc"]
+        if obj.size > self.size:
+            return m["bc"]
+        return None  # same-size unwalled cells: no gene yet
+
+    def _score(self, obj):
+        gene = self._gene_for(obj)
+        if not gene:  # None or 0.0 -> ignored
+            return 0.0, 0
+        d2 = self.dist_sq(obj) + 1.0  # +1 avoids div-by-zero on contact
+        return abs(gene) / d2, (1 if gene > 0 else -1)
+
+    def decide(self):
+        best, best_score, best_sign = None, 0.0, 0
+        for obj in (*self.nearby_entities, *self.nearby_particles):
+            if isinstance(obj, Particle) and obj.eaten:
+                continue
+            score, sign = self._score(obj)
+            if score > best_score:
+                best, best_score, best_sign = obj, score, sign
+
+        # hysteresis: keep the current target unless the new one is clearly better
+        current = getattr(self, "ai_target", None)
+        if current is not None and current is not best:
+            cur_score, cur_sign = self._score(current)
+            still_there = cur_score > 0 and not getattr(current, "eaten", False)
+            if still_there and cur_score * self._SWITCH_MARGIN >= best_score:
+                best, best_sign = current, cur_sign
+        self.ai_target = best
+
+        if best is None:
+            # nothing worth reacting to: keep drifting the way we were going
+            v = self.body.velocity
+            if v.length > 1:
+                return v.normalized()
+            a = random.uniform(0, 2 * math.pi)
+            return Vec2d(math.cos(a), math.sin(a))
+
+        tx, ty = (best.x, best.y) if isinstance(best, Particle) else best.body.position
+        offset = Vec2d(tx - self.body.position.x, ty - self.body.position.y)
+        dist = offset.length
+        if dist < 1e-6:
+            return Vec2d(0, 0)
+        direction = offset / dist * best_sign  # unit, toward (+) or away (-)
+
+        # arrival: ease thrust when closing on something we're attracted to
+        if best_sign > 0:
+            arrive = self.size * self._ARRIVE_RADIUS
+            if dist < arrive:
+                direction *= dist / arrive
+        return direction
 
     def apply_movement(self, direction, steps=1):
-        """Act on a desired direction from this cell's decision model. AI cells
-        call this; the player never does (player uses handle_input). Same rules
-        as manual movement: a cell wall forbids it, and moving costs energy and
-        sets has_moved, so mutation rules stay identical for AI and player.
-        `steps` > 1 when the cell is only updated every `steps` frames (far
-        from the player): the push and its energy cost cover all of them."""
+        """
+        Apply movement along one axis at a time,
+        preserving existing velocity on the other axis.
+        """
         if self.has_cell_wall or self.is_splitting:
             return
+
         dx, dy = direction
         if dx == 0 and dy == 0:
             return
-        vx = self.body.velocity.x + dx * self.acceleration * steps
-        vy = self.body.velocity.y + dy * self.acceleration * steps
-        speed = math.hypot(vx, vy)
-        if speed > self.max_speed:
-            scale = self.max_speed / speed
-            vx *= scale
-            vy *= scale
+
+        vx, vy = self.body.velocity
+        acceleration = self.acceleration * steps
+        # Determine which axis to accelerate along
+        if abs(dx) >= abs(dy):
+            vx += math.copysign(acceleration, dx)
+        else:
+            vy += math.copysign(acceleration, dy)
+
+        # Enforce maximum speed
+        vx = max(-self.max_speed, min(self.max_speed, vx))
+        vy = max(-self.max_speed, min(self.max_speed, vy))
+
         self.body.velocity = (vx, vy)
         self.add_energy(-self._movement_cost() * steps)
         self.has_moved = True
@@ -470,7 +530,10 @@ class Cell:
 
         if dx * dx + dy * dy <= self.size * self.size:
             self.add_energy(1000 * particle.multiplier)
-            self.mass += 1 * particle.multiplier
+            if self.has_cell_wall:
+                self.mass += 1 * particle.multiplier
+            else:
+                self.mass += 1 * particle.multiplier
             if self.mass >= self.max_mass:
                 self.mass = self.max_mass
                 self.add_energy(4000 * particle.multiplier)
@@ -481,6 +544,8 @@ class Cell:
             audio.play_eat_particle(self.body.position)
             if particle in self.nearby_particles:
                 self.nearby_particles.remove(particle)
+            if particle.type == 0:
+                self.amt_type0_particles += 1
             if particle.type == 1:
                 self.amt_type1_particles += 1
             if particle.type == 2:
@@ -595,10 +660,9 @@ class Cell:
                 # the organism here, so removing it in Game.kill_cell
                 # triggers no connectivity check. (Plants / fungi never
                 # belong to one; a member that mutated a wall still does.)
+                # (the organism's is_player follows new_cell1 automatically --
+                # see Multicell.is_player)
                 adopt_daughters(self, new_cell1, new_cell2)
-
-            if self.multicell is not None and new_cell1.is_player:
-                self.multicell.is_player = True
 
         else:
             # daughter 1 leaves along the parent's heading and picks the parent's
