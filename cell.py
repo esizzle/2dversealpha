@@ -171,6 +171,9 @@ class Genome:
                 self.max_mass = max(self.mass_range[0], min(self.max_mass, self.mass_range[1]))
                 self.size = self.max_mass // 2
 
+        for _ in range(cell.amt_type3_particles):
+            if random.random() < self.mutation_rate:
+                self.max_speed = min(self.max_speed + 5, self.speed_range[1])
         self.acceleration = self.max_speed
 
         # mutate cell wall: only cells that never moved can evolve one
@@ -236,6 +239,7 @@ class Genome:
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["p3"] += 0.1
                 # maybe change to sc and bepc just to get weird behaviours from eating mushrooms (originally bc and spc)
+                # maybe add increased bepc
                 if random.random() < self.mutation_rate:
                     self.intelligence_matrix["bc"] -= 0.1
                 if random.random() < self.mutation_rate:
@@ -737,7 +741,7 @@ class Cell:
         # lower consumption efficiency
         edible_mass = self.mass * 0.4
         if self.has_cell_wall and (self.is_fungi or self.has_chloroplast):
-            num_large_particles = int(edible_mass // 6)
+            num_large_particles = max(1, int(edible_mass // 6))
             num_small_particles = int(edible_mass % 6)
             total = num_small_particles + num_large_particles
             if total == 0:
@@ -748,7 +752,7 @@ class Cell:
                 choices = [0] * num_small_particles + [3] * num_large_particles
 
         else:
-            num_large_particles = int(edible_mass // 5)
+            num_large_particles = max(1, int(edible_mass // 5))
             num_small_particles = int(edible_mass % 5)
             total = num_small_particles + num_large_particles
             if total == 0:
