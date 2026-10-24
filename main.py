@@ -564,6 +564,11 @@ class Game:
         if same_organism(predator_cell, prey_cell):
             return True
 
+        # sisters (the two daughters of one split) never hurt each other
+        # either -- e.g. when one of them mutated a cell wall
+        if predator_cell.is_sister_of(prey_cell):
+            return True
+
         predator_cell.contact_time[prey_cell] = 0.0
         return True
 

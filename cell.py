@@ -345,6 +345,11 @@ class Cell:
 
         # object tracking
         self.id = uuid.uuid4()
+        # id of the other daughter from the split that made this cell (None
+        # for cells that weren't born from a split). Sisters never see each
+        # other in nearby_entities, so they can't eat or chase each other.
+        # Stored as an id, not the Cell, so a dead sister isn't kept alive.
+        self.sister_id = None
         self.contact_time = {}
         self.total_contact_time = 0
 
@@ -556,12 +561,21 @@ class Cell:
             for dy in (-1, 0, 1)
         ]
 
+    def is_sister_of(self, other):
+        """True if self and other are the two daughters of the same split."""
+        return self.sister_id is not None and self.sister_id == getattr(other, "id", None)
+
     def get_nearby_objects(self, world):
+        sister = self.sister_id
         for gx, gy in self.neighboring_grid_cells:
             cell = world.get_lvl1_chunk_local_cell((gx, gy))
             if cell and isinstance(cell, WaterCell):
                 self.nearby_particles.extend(cell.particles)
-                self.nearby_entities.extend(cell.entities)
+                if sister is None:
+                    self.nearby_entities.extend(cell.entities)
+                else:
+                    # sisters are invisible to each other (see sister_id)
+                    self.nearby_entities.extend(e for e in cell.entities if e.id != sister)
 
     # ------------------------------------------------------------------
     # Eating
@@ -724,6 +738,10 @@ class Cell:
         # track new cell generation
         new_cell1.generation = self.generation + 1
         new_cell2.generation = self.generation + 1
+        # the two daughters are sisters for life: hidden from each other's
+        # nearby_entities, so neither can eat (or target) the other
+        new_cell1.sister_id = new_cell2.id
+        new_cell2.sister_id = new_cell1.id
         # add new cells to game cell list
         cell_list.extend([new_cell1, new_cell2])
 
